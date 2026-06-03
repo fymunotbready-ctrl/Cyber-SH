@@ -1,5 +1,28 @@
 # CYBER SH — Full Installation Guide
 
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![Platform: Linux/WSL](https://img.shields.io/badge/Platform-Linux%2FWSL-orange?style=flat-square&logo=linux)](https://www.linux.org/)
+[![Status: Active](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)](https://github.com/neo4-svg/cybersh)
+[![AI-Powered](https://img.shields.io/badge/AI--Powered-Local%20GGUF%20Models-red?style=flat-square)](https://github.com/ggerganov/llama.cpp)
+[![Pure Python](https://img.shields.io/badge/Pure-Python%20Stdlib-green?style=flat-square)](https://www.python.org/)
+
+## Demo
+
+![CYBER SH Demo](./assets/demo.png)
+
+*CYBER SH in action — Agent mode with cyberpunk UI, real-time AI responses, and command execution*
+
+## Features
+
+- **Agent Mode** — AI controls your CLI with full system access
+- **Sec Mode** — Bug bounty and penetration testing expert
+- **Vibe Mode** — Creative coding and UI/UX assistance  
+- **Code Mode** — Production-ready code generation
+- **Chat Mode** — General-purpose AI assistant
+
+**All 100% offline. No servers, no API keys, no data leaving your machine.**
+
 ## Requirements
 
 - OS:     Linux (Kali, Ubuntu, Debian) or Windows WSL2
