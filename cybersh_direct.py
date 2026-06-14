@@ -93,11 +93,11 @@ def save_cfg(cfg: dict) -> None:
 def web_search(query: str, max_results: int = 5) -> str:
     """Search DuckDuckGo and return results as text. No API key needed."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         return (
-            f"{NEON_R}✗ duckduckgo-search not installed.{R}\n"
-            f"{NEON_Y}Fix:{R} pip install duckduckgo-search --break-system-packages"
+            f"{NEON_R}✗ ddgs not installed.{R}\n"
+            f"{NEON_Y}Fix:{R} pip install ddgs --break-system-packages"
         )
     try:
         results = []
