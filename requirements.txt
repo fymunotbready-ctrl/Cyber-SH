@@ -5,4 +5,4 @@
 llama-cpp-python
 
 # Web search — enables /web and /cvesearch commands (recommended)
-duckduckgo-search
+ddgs
