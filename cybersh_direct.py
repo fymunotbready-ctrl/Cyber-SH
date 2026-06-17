@@ -643,15 +643,39 @@ def get_llm(cfg: dict):
           f"{DIM}({size_gb:.1f} GB)…{R}")
     print(f"{DIM}This takes 5-15 seconds on first load…{R}\n")
 
-    # Auto-detect GPU layers
+    # ── Auto-detect GPU every time ────────────────────────────
     n_gpu_layers = 0
-    try:
-        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
-        if result.returncode == 0:
-            n_gpu_layers = -1  # -1 = offload all layers to GPU
-            print(f"{NEON_G}✓ NVIDIA GPU detected — using GPU acceleration!{R}\n")
-    except FileNotFoundError:
-        pass  # No nvidia-smi, stay on CPU
+    gpu_info     = _detect_gpu()
+
+    if gpu_info["type"] == "nvidia":
+        # check if llama-cpp-python was built with CUDA support
+        try:
+            from llama_cpp import llama_supports_gpu_offload
+            cuda_ok = llama_supports_gpu_offload()
+        except ImportError:
+            cuda_ok = False
+        except Exception:
+            cuda_ok = True  # older versions don't have this fn but may work
+
+        if cuda_ok:
+            n_gpu_layers = -1  # -1 = offload ALL layers to GPU
+            print(f"{NEON_G}✓ NVIDIA GPU: {gpu_info['name']} ({gpu_info['vram']}) — CUDA ON ⚡{R}\n")
+        else:
+            print(f"{NEON_Y}⚠ NVIDIA GPU found ({gpu_info['name']}) but CUDA not enabled.{R}")
+            print(f"{DIM}  To enable: CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python --force-reinstall --break-system-packages{R}")
+            print(f"{DIM}  Running on CPU for now.{R}\n")
+
+    elif gpu_info["type"] == "amd":
+        print(f"{NEON_Y}⚠ AMD GPU: {gpu_info['name']} detected.{R}")
+        print(f"{DIM}  ROCm support is experimental. Running on CPU.{R}")
+        print(f"{DIM}  To try GPU: CMAKE_ARGS=\"-DGGML_HIPBLAS=on\" pip install llama-cpp-python --force-reinstall --break-system-packages{R}\n")
+
+    elif gpu_info["type"] == "intel":
+        print(f"{NEON_Y}⚠ Intel GPU: {gpu_info['name']} detected.{R}")
+        print(f"{DIM}  Intel Arc/iGPU acceleration not yet supported. Running on CPU.{R}\n")
+
+    else:
+        print(f"{DIM}  No GPU detected — running on CPU ({cfg.get('threads',4)} threads){R}\n")
 
     _llm_instance = Llama(
         model_path   = model_path,
@@ -662,6 +686,76 @@ def get_llm(cfg: dict):
     )
     print(f"{NEON_G}✓ Model ready!{R}\n")
     return _llm_instance
+
+
+def _detect_gpu() -> dict:
+    """Detect GPU type, name, and VRAM. Returns dict with type/name/vram."""
+    info = {"type": None, "name": "Unknown", "vram": ""}
+
+    # ── NVIDIA — nvidia-smi ───────────────────────────────────
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split(",")
+            name  = parts[0].strip() if parts else "NVIDIA GPU"
+            vram  = f"{int(parts[1].strip())//1024}GB VRAM" if len(parts) > 1 else ""
+            return {"type": "nvidia", "name": name, "vram": vram}
+    except Exception:
+        pass
+
+    # ── AMD — rocm-smi ───────────────────────────────────────
+    try:
+        r = subprocess.run(["rocm-smi", "--showproductname"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                if "card" in line.lower() or "gpu" in line.lower() or "rx" in line.lower():
+                    name = line.strip().split(":")[-1].strip() or "AMD GPU"
+                    return {"type": "amd", "name": name, "vram": ""}
+    except Exception:
+        pass
+
+    # ── AMD fallback — lspci ─────────────────────────────────
+    try:
+        r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                ll = line.lower()
+                if "amd" in ll and ("vga" in ll or "display" in ll or "3d" in ll):
+                    name = line.split(":")[-1].strip()[:50]
+                    return {"type": "amd", "name": name, "vram": ""}
+                if "nvidia" in ll and ("vga" in ll or "display" in ll or "3d" in ll):
+                    name = line.split(":")[-1].strip()[:50]
+                    return {"type": "nvidia", "name": name, "vram": ""}
+                if "intel" in ll and ("vga" in ll or "display" in ll or "3d" in ll):
+                    name = line.split(":")[-1].strip()[:50]
+                    return {"type": "intel", "name": name, "vram": ""}
+    except Exception:
+        pass
+
+    # ── macOS — system_profiler ──────────────────────────────
+    try:
+        r = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True, text=True, timeout=8
+        )
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if "Chipset Model:" in line:
+                    name = line.split(":", 1)[-1].strip()
+                    gpu_type = "nvidia" if "nvidia" in name.lower() \
+                               else "amd" if "amd" in name.lower() \
+                               else "intel" if "intel" in name.lower() \
+                               else "other"
+                    return {"type": gpu_type, "name": name, "vram": ""}
+    except Exception:
+        pass
+
+    return info
 
 def build_prompt(messages: list, model_path: str) -> str:
     """Build prompt string from messages list."""
@@ -1682,15 +1776,20 @@ def setup_wizard(cfg: dict) -> None:
     cfg["threads"] = int(t) if t.isdigit() else cpu_count
 
     # GPU check
-    try:
-        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"\n{NEON_G}✓ NVIDIA GPU detected!{R}")
-            print(f"{NEON_Y}For GPU acceleration, reinstall llama-cpp-python with CUDA:{R}")
-            print(f"  {NEON_C}CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python --force-reinstall --break-system-packages{R}")
-            print(f"{DIM}(Skip this if already done — GPU will be used automatically){R}")
-    except FileNotFoundError:
-        print(f"\n{DIM}No NVIDIA GPU detected — using CPU (normal){R}")
+    gpu = _detect_gpu()
+    if gpu["type"] == "nvidia":
+        print(f"\n{NEON_G}✓ NVIDIA GPU detected: {gpu['name']} {gpu['vram']}{R}")
+        print(f"{NEON_Y}For GPU acceleration, reinstall llama-cpp-python with CUDA:{R}")
+        print(f"  {NEON_C}CMAKE_ARGS=\"-DGGML_CUDA=on\" pip install llama-cpp-python --force-reinstall --break-system-packages{R}")
+        print(f"{DIM}(GPU will be used automatically every time you run the tool){R}")
+    elif gpu["type"] == "amd":
+        print(f"\n{NEON_Y}⚠ AMD GPU detected: {gpu['name']}{R}")
+        print(f"{DIM}ROCm support is experimental. CPU will be used by default.{R}")
+    elif gpu["type"] == "intel":
+        print(f"\n{NEON_Y}⚠ Intel GPU detected: {gpu['name']}{R}")
+        print(f"{DIM}Intel GPU acceleration not yet supported. CPU will be used.{R}")
+    else:
+        print(f"\n{DIM}No dedicated GPU detected — running on CPU (normal){R}")
 
     save_cfg(cfg)
     print(f"\n{NEON_G}✓ Setup complete!{R}")
