@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# version: 1.2
 """
  ██████╗██╗   ██╗██████╗ ███████╗██████╗     ███████╗██╗  ██╗
 ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║  ██║
@@ -9,7 +10,195 @@
   CYBER SH DIRECT — No Server · Pure Python · llama-cpp-python
 """
 
-import sys, os, json, time, shutil, re, subprocess, threading, datetime, textwrap, argparse, glob
+import sys, os, json, time, shutil, re, subprocess, threading, datetime, textwrap, argparse, glob, readline
+
+# ══════════════════════════════════════════════════════════════
+#  AUTO-UPDATER
+# ══════════════════════════════════════════════════════════════
+REPO_RAW    = "https://raw.githubusercontent.com/neo4-svg/cybersh/main"
+VERSION_URL = f"{REPO_RAW}/version.txt"
+SCRIPT_URL  = f"{REPO_RAW}/cybersh_direct.py"
+REQS_URL    = f"{REPO_RAW}/requirements.txt"
+
+def _http_get(url: str, timeout: int = 10) -> str | None:
+    try:
+        import urllib.request, ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers={"User-Agent": "cybersh-updater/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+def _is_online() -> bool:
+    import socket
+    for host, port in [("github.com", 443), ("8.8.8.8", 53), ("1.1.1.1", 53)]:
+        try:
+            socket.setdefaulttimeout(3)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((host, port)); s.close()
+            return True
+        except Exception:
+            continue
+    return False
+
+def _detect_os() -> dict:
+    import platform
+    info = {
+        "system":  platform.system(),
+        "distro":  "",
+        "pkg_mgr": None,
+        "pip_flag": [],
+        "is_venv": sys.prefix != sys.base_prefix,
+    }
+    if info["system"] == "Linux":
+        os_release = {}
+        for path in ("/etc/os-release", "/usr/lib/os-release"):
+            try:
+                with open(path) as f:
+                    for line in f:
+                        k, _, v = line.strip().partition("=")
+                        os_release[k] = v.strip('"')
+                break
+            except Exception:
+                pass
+        distro_id = os_release.get("ID", "").lower()
+        like      = os_release.get("ID_LIKE", "").lower()
+        info["distro"] = os_release.get("PRETTY_NAME", distro_id)
+        apt_ids    = {"debian","ubuntu","kali","parrot","linuxmint","pop","elementary","mx","zorin","raspbian"}
+        dnf_ids    = {"fedora","rhel","centos","almalinux","rocky","ol","nobara"}
+        pacman_ids = {"arch","manjaro","endeavouros","garuda","artix","cachyos"}
+        zypper_ids = {"opensuse","suse","opensuse-leap","opensuse-tumbleweed"}
+        apk_ids    = {"alpine"}
+        all_ids    = {distro_id} | set(like.split())
+        if   all_ids & apt_ids:    info["pkg_mgr"] = "apt"
+        elif all_ids & dnf_ids:    info["pkg_mgr"] = "dnf"
+        elif all_ids & pacman_ids: info["pkg_mgr"] = "pacman"
+        elif all_ids & zypper_ids: info["pkg_mgr"] = "zypper"
+        elif all_ids & apk_ids:    info["pkg_mgr"] = "apk"
+        if not info["is_venv"]:
+            info["pip_flag"] = ["--break-system-packages"]
+    elif info["system"] == "Darwin":
+        info["distro"] = "macOS"; info["pkg_mgr"] = "brew"
+    elif info["system"] == "Windows":
+        info["distro"] = "Windows"
+    return info
+
+def _install_packages(pkgs: list) -> None:
+    G="\033[38;5;82m"; C="\033[38;5;51m"; Y="\033[38;5;226m"; D="\033[2m"; R2="\033[0m"
+    os_info = _detect_os()
+    flag    = os_info["pip_flag"]
+    print(f"  {D}OS: {os_info['distro'] or os_info['system']}{R2}")
+    for pkg in pkgs:
+        print(f"  {C}→{R2} {pkg}", end="", flush=True)
+        pip_cmd = [sys.executable, "-m", "pip", "install", pkg, "--quiet", "--upgrade"] + flag
+        r = subprocess.run(pip_cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"\r  {G}✓{R2} {pkg}                    "); continue
+        # fallback: without flag
+        r2 = subprocess.run(
+            [sys.executable, "-m", "pip", "install", pkg, "--quiet", "--upgrade"],
+            capture_output=True, text=True)
+        if r2.returncode == 0:
+            print(f"\r  {G}✓{R2} {pkg}                    "); continue
+        # fallback: system package manager
+        pm = os_info["pkg_mgr"]
+        if pm:
+            pm_cmds = {
+                "apt":    ["sudo","apt","install","-y",f"python3-{pkg}"],
+                "dnf":    ["sudo","dnf","install","-y",f"python3-{pkg}"],
+                "pacman": ["sudo","pacman","-S","--noconfirm",f"python-{pkg}"],
+                "zypper": ["sudo","zypper","install","-y",f"python3-{pkg}"],
+                "apk":    ["sudo","apk","add",f"py3-{pkg}"],
+            }
+            r3 = subprocess.run(pm_cmds[pm], capture_output=True, text=True)
+            if r3.returncode == 0:
+                print(f"\r  {G}✓{R2} {pkg} {D}(via {pm}){R2}              "); continue
+        err = (r.stderr or "").strip().split("\n")[-1][:60]
+        print(f"\r  {Y}⚠{R2} {pkg} — {D}{err}{R2}")
+        print(f"    {D}Manual: pip install {pkg} --break-system-packages{R2}")
+
+def check_and_update(force: bool = False) -> None:
+    G="\033[38;5;82m"; C="\033[38;5;51m"; Y="\033[38;5;226m"
+    B="\033[1m"; D="\033[2m"; R2="\033[0m"
+
+    this_file = os.path.realpath(os.path.abspath(__file__))
+
+    # read local version from line 2
+    local_ver = "0.0.0"
+    try:
+        with open(this_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("# version:"):
+                    local_ver = line.split(":", 1)[1].strip(); break
+    except Exception:
+        pass
+
+    print(f"\n{C}🔄 Checking for updates…{R2}", end="", flush=True)
+
+    if not force and not _is_online():
+        print(f"\r{D}  ↷ No internet — skipping update check.{R2}          \n")
+        return
+
+    remote_ver = _http_get(VERSION_URL)
+    if not remote_ver:
+        print(f"\r{D}  ↷ Could not reach GitHub — skipping.{R2}            \n")
+        return
+
+    remote_ver = remote_ver.strip()
+
+    def ver_tuple(v):
+        try: return tuple(int(x) for x in v.split("."))
+        except: return (0, 0, 0)
+
+    if not force and ver_tuple(remote_ver) <= ver_tuple(local_ver):
+        print(f"\r{G}  ✓ Up to date (v{local_ver}){R2}                          \n")
+        return
+
+    print(f"\r{Y}  ✦ Update: v{local_ver} → v{remote_ver}{R2}                    ")
+    print(f"  {D}Downloading…{R2}", end="", flush=True)
+
+    new_code = _http_get(SCRIPT_URL)
+    if not new_code or len(new_code) < 1000:
+        print(f"\r\033[38;5;196m  ✗ Download failed — keeping current version.{R2}\n"); return
+
+    # validate python syntax before overwriting
+    try:
+        import ast as _ast; _ast.parse(new_code)
+    except SyntaxError:
+        print(f"\r\033[38;5;196m  ✗ Downloaded file invalid — aborting.{R2}\n"); return
+
+    # backup
+    backup = this_file + f".backup_v{local_ver}"
+    try:
+        import shutil as _sh; _sh.copy2(this_file, backup)
+        print(f"\r  {D}Backup: {os.path.basename(backup)}{R2}                         ")
+    except Exception:
+        pass
+
+    # write new file
+    try:
+        with open(this_file, "w", encoding="utf-8") as f: f.write(new_code)
+    except PermissionError:
+        print(f"\r\033[38;5;196m  ✗ Permission denied. Try: chmod +w {this_file}{R2}\n"); return
+    except Exception as e:
+        print(f"\r\033[38;5;196m  ✗ Write error: {e}{R2}\n"); return
+
+    # install/update dependencies
+    new_reqs = _http_get(REQS_URL)
+    if new_reqs:
+        pkgs = [l.strip() for l in new_reqs.splitlines()
+                if l.strip() and not l.startswith("#") and not l.startswith("-")]
+        if pkgs:
+            print(f"  {C}📦 Installing dependencies…{R2}")
+            _install_packages(pkgs)
+
+    print(f"\n{G}{B}  ✓ Updated to v{remote_ver} — restarting!{R2}\n")
+    time.sleep(1)
+    os.execv(sys.executable, [sys.executable, this_file] + sys.argv[1:])
 
 # ══════════════════════════════════════════════════════════════
 #  ANSI
@@ -20,6 +209,273 @@ NEON_P = "\033[38;5;201m"; NEON_Y = "\033[38;5;226m"
 NEON_O = "\033[38;5;208m"; NEON_R = "\033[38;5;196m"
 BOLD_C = f"\033[1m{NEON_C}"; BOLD_Y = f"\033[1m{NEON_Y}"
 CLEAR  = "\033[2K\r"
+
+# ══════════════════════════════════════════════════════════════
+#  RICH INPUT BAR — Claude-style typing experience
+# ══════════════════════════════════════════════════════════════
+ALL_COMMANDS = [
+    "/vibe","/sec","/code","/chat","/agent","/help","/exit","/quit",
+    "/clear","/history","/temp","/info","/save","/f","/o","/run","/copy",
+    "/recon","/payload","/explain","/cvesearch","/web","/models",
+    "/tldr","/howto","/fix","/passgen","/encode","/syswatch",
+    "/benchmark","/note","/notes","/tip",
+    "/explaincode","/roast","/challenge","/recap","/translate","/weather",
+    "/timer","/rename","/regex","/git","/ctf","/diff",
+    "/remember","/memories","/memory","/forget",
+    "/persona","/summarize","/calc","/goals","/goal",
+    "--update","--no-update",
+]
+
+class RichInput:
+    """Claude-style input bar with autocomplete, history nav, and live char count."""
+
+    def __init__(self):
+        self._setup_readline()
+
+    def _setup_readline(self):
+        try:
+            readline.set_completer(self._completer)
+            readline.set_completer_delims(" \t")
+            readline.parse_and_bind("tab: complete")
+            # history
+            hist = os.path.expanduser("~/.cybersh_input_history")
+            try:
+                readline.read_history_file(hist)
+            except FileNotFoundError:
+                pass
+            readline.set_history_length(500)
+            import atexit
+            atexit.register(readline.write_history_file, hist)
+        except Exception:
+            pass
+
+    def _completer(self, text, state):
+        options = [c for c in ALL_COMMANDS if c.startswith(text)]
+        return options[state] if state < len(options) else None
+
+    def read(self, prompt: str, multiline_hint: bool = True) -> str:
+        """Read input with rich prompt. Shift+Enter hint shown. Returns stripped text."""
+        try:
+            # show char count hint for long inputs
+            text = input(prompt)
+            return text.strip()
+        except (EOFError, KeyboardInterrupt):
+            raise KeyboardInterrupt
+
+_rich_input = RichInput()
+
+def rich_prompt(mode_color: str, icon: str, cwd: str) -> str:
+    """Render the Claude-style input bar and return user input."""
+    w = min(shutil.get_terminal_size((80, 24)).columns, 80)
+
+    # top border
+    sys.stdout.write(f"\n{DIM}{'─' * w}{R}\n")
+
+    # prompt line
+    prompt = f"{mode_color}{BOLD}{icon} {R}{NEON_C}[{cwd}]{R}{DIM} ▶ {R}"
+    try:
+        text = _rich_input.read(prompt)
+    except KeyboardInterrupt:
+        print()
+        raise
+
+    return text
+
+# ══════════════════════════════════════════════════════════════
+#  EXPERIMENTAL FEATURES
+# ══════════════════════════════════════════════════════════════
+
+def cmd_explain_code(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Paste a code snippet and AI explains every line."""
+    if arg:
+        code = arg
+    else:
+        print(f"{NEON_Y}Paste your code (type END on a new line when done):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        code = "\n".join(lines)
+    if not code: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Explain this code line by line in plain English. "
+        f"Format each explanation as: `line` → what it does.\n\n```\n{code}\n```")
+
+def cmd_roast(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI roasts your code — finds bad practices with humor."""
+    code = arg
+    if not code:
+        print(f"{NEON_Y}Paste your code to roast (END to finish):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        code = "\n".join(lines)
+    if not code: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Roast this code like a senior dev who's seen it all. "
+        f"Be funny but accurate — point out every bad practice, naming issue, "
+        f"security hole, and inefficiency. Then at the end give the fixed version.\n\n```\n{code}\n```")
+
+def cmd_challenge(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI gives you a coding or hacking challenge to solve."""
+    level = arg.lower() if arg else "medium"
+    mode  = cfg.get("mode", "chat")
+    if mode == "sec":
+        topic = "penetration testing or CTF"
+    elif mode in ("code", "vibe"):
+        topic = "programming"
+    else:
+        topic = "Linux or general tech"
+    return ask(cfg, messages, session_msgs,
+        f"Give me a {level} difficulty {topic} challenge. "
+        f"Format: 1) Challenge title. 2) Description. 3) What I need to do. "
+        f"4) Hints (hidden in a spoiler block using >! syntax). "
+        f"5) What a correct solution looks like (also hidden). Make it fun and interesting.")
+
+def cmd_recap(messages: list) -> None:
+    """AI-style recap of this session so far."""
+    w   = min(shutil.get_terminal_size((80,24)).columns, 70)
+    div = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  📋 Session Recap{R}")
+    print(div)
+    count = 0
+    for m in messages:
+        if m["role"] == "user" and not m["content"].startswith("["):
+            count += 1
+            preview = textwrap.shorten(m["content"], 65)
+            print(f"  {NEON_Y}{count:>2}.{R} {preview}")
+    if count == 0:
+        print(f"  {DIM}No messages yet.{R}")
+    print(f"\n  {DIM}Total exchanges: {count}{R}")
+    print(f"{div}\n")
+
+def cmd_translate(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Translate any text to any language."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /translate <lang> <text>")
+        print(f"Example: /translate arabic Hello how are you{R}\n")
+        return ""
+    parts = arg.split(maxsplit=1)
+    lang  = parts[0]
+    text  = parts[1] if len(parts) > 1 else ""
+    if not text:
+        print(f"{NEON_Y}Usage: /translate <language> <text>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Translate this to {lang}. Show only the translation, nothing else:\n{text}")
+
+def cmd_weather_ascii(arg: str) -> None:
+    """Fetch weather as ASCII art using wttr.in."""
+    loc = arg.strip() or ""
+    url = f"https://wttr.in/{loc}?A"
+    print(f"\n{NEON_C}🌤 Fetching weather…{R}\n")
+    r = subprocess.run(["curl","-s","--max-time","5", url],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout:
+        print(r.stdout)
+    else:
+        print(f"{NEON_R}✗ Could not fetch weather. Check internet.{R}\n")
+
+def cmd_timer(arg: str) -> None:
+    """Countdown timer. /timer 5m or /timer 30s or /timer 1h"""
+    import time as _time
+    if not arg:
+        print(f"{NEON_Y}Usage: /timer 30s | /timer 5m | /timer 1h{R}\n"); return
+    arg = arg.strip().lower()
+    try:
+        if arg.endswith("h"):   secs = int(arg[:-1]) * 3600
+        elif arg.endswith("m"): secs = int(arg[:-1]) * 60
+        elif arg.endswith("s"): secs = int(arg[:-1])
+        else:                   secs = int(arg)
+    except ValueError:
+        print(f"{NEON_R}✗ Invalid time. Use 30s, 5m, or 1h.{R}\n"); return
+
+    total = secs
+    print(f"\n{NEON_C}⏱  Timer: {arg}{R}  {DIM}(Ctrl+C to stop){R}\n")
+    try:
+        while secs > 0:
+            h, rem = divmod(secs, 3600)
+            m, s   = divmod(rem, 60)
+            bar_w  = 30
+            filled = int(bar_w * (total - secs) / total)
+            bar    = f"{NEON_G}{'█'*filled}{DIM}{'░'*(bar_w-filled)}{R}"
+            ts     = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            sys.stdout.write(f"\r  {bar}  {NEON_Y}{BOLD}{ts}{R}  ")
+            sys.stdout.flush()
+            _time.sleep(1)
+            secs -= 1
+        sys.stdout.write(f"\r{CLEAR}")
+        print(f"\n{NEON_G}{BOLD}  ✓ TIME'S UP! 🔔{R}\n")
+        # terminal bell
+        sys.stdout.write("\a"); sys.stdout.flush()
+    except KeyboardInterrupt:
+        sys.stdout.write(f"\r{CLEAR}")
+        print(f"\n{NEON_Y}  Timer stopped.{R}\n")
+
+def cmd_ai_rename(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI suggests better names for variables, functions, files."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /rename <name>  — AI suggests better names{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Suggest 5 better names for this identifier: `{arg}`\n"
+        f"Consider: clarity, convention (snake_case for Python, camelCase for JS), "
+        f"and what the name implies. Format as a numbered list with a one-line reason for each.")
+
+def cmd_regex(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI writes a regex for you."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /regex <describe what to match>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Write a regex pattern for: {arg}\n"
+        f"Format: 1) The pattern. 2) Language-specific examples (Python, JS, grep). "
+        f"3) Explanation of each part. 4) Test cases showing matches and non-matches.")
+
+def cmd_githelp(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI explains or generates git commands."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /git <what you want to do>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Git help: {arg}\n"
+        f"Give the exact git command(s) to accomplish this. "
+        f"If there are multiple approaches, show the safest one first. "
+        f"Add a one-line warning if the command is destructive (rebase, force push, reset --hard etc).")
+
+def cmd_ctf(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """CTF challenge helper — analyze flags, hints, encodings."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /ctf <paste challenge text or data>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"CTF challenge analysis:\n{arg}\n\n"
+        f"Identify: 1) Challenge category (crypto, forensics, web, pwn, rev, misc). "
+        f"2) Any encodings or ciphers present. 3) Tools to use. "
+        f"4) Step-by-step approach to solve it. Don't give the flag directly — guide me.")
+
+def cmd_diff_explain(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Paste a git diff and AI explains what changed and why it matters."""
+    diff = arg
+    if not diff:
+        print(f"{NEON_Y}Paste your git diff (END to finish):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        diff = "\n".join(lines)
+    if not diff: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Explain this git diff in plain English:\n```diff\n{diff}\n```\n"
+        f"Cover: what changed, why it might have changed, any risks or bugs introduced.")
+
+
 
 # ══════════════════════════════════════════════════════════════
 #  CONFIG
@@ -436,7 +892,7 @@ def print_banner(cfg: dict) -> None:
           f"{NEON_C}TEMP{R} {NEON_Y}{cfg['temperature']}{R}  {DIM}{now}{R}")
     print(div())
     print(f"  {DIM}Modes:{R} {NEON_P}/vibe{R} {NEON_G}/sec{R} "
-          f"{NEON_Y}/code{R} {NEON_C}/chat{R} {NEON_O}/agent{R}  "
+          f"{NEON_Y}/code{R} {NEON_C}/chat{R} {NEON_O}/agent{R} {NEON_G}/shell{R}  "
           f"{DIM}Files:{R} {NEON_C}/f <path>  /o <path>{R}  "
           f"{DIM}Help:{R} {NEON_C}/help{R}")
     print(div() + "\n")
@@ -484,6 +940,32 @@ def print_help() -> None:
             ("/code", "⚡ Production code"),
             ("/chat", "💬 General chat"),
         ]),
+        ("🧠 MEMORY", [
+            ("/remember <anything>",  "AI remembers this forever"),
+            ("/remember name is X",   "Remember your name"),
+            ("/remember project X Y", "Save a project description"),
+            ("/memories",             "Show everything remembered"),
+            ("/forget <keyword>",     "Delete a memory"),
+        ]),
+        ("🎭 PERSONALITY", [
+            ("/persona",              "List AI personalities"),
+            ("/persona teacher",      "Patient teacher mode"),
+            ("/persona hacker",       "Elite hacker mentor"),
+            ("/persona coach",        "Motivating life coach"),
+            ("/persona roaster",      "Roasts bad ideas (with fixes)"),
+            ("/persona sherlock",     "Sherlock Holmes mode"),
+        ]),
+        ("🎯 PRODUCTIVITY", [
+            ("/goals",                "Show today's goals"),
+            ("/goals add <goal>",     "Add a daily goal"),
+            ("/goals done <n>",       "Mark goal as done"),
+            ("/calc <expr>",          "Quick math: /calc 15% of 240"),
+            ("/summarize <url>",      "Fetch + summarize any webpage"),
+            ("/timer 5m",             "Countdown timer"),
+            ("/weather [city]",       "ASCII weather forecast"),
+            ("/translate <l> <t>",    "Translate to any language"),
+            ("/recap",                "Summary of this session"),
+        ]),
         ("FILES", [
             ("/f <path>", "Load file into AI context"),
             ("/o <path>", "Save last response to file"),
@@ -499,6 +981,32 @@ def print_help() -> None:
         ("WEB & MODELS", [
             ("/web <query>",       "Search web, feed results to AI"),
             ("/models",            "Download a new model"),
+        ]),
+        ("TOOLS", [
+            ("/tldr <cmd>",        "Explain any command in plain English"),
+            ("/howto <task>",      "Get exact command for any task"),
+            ("/fix <error>",       "Paste error, get instant fix"),
+            ("/passgen [type]",    "Generate passwords/phrases/API keys"),
+            ("/encode <text>",     "Base64/hex/URL/MD5/SHA256 encode"),
+            ("/syswatch",          "Live CPU/RAM/disk monitor"),
+            ("/benchmark",         "CPU + RAM + disk speed test with score"),
+            ("/note <text>",       "Save a quick note"),
+            ("/notes list",        "Show all notes"),
+            ("/tip",               "Show tip of the day"),
+            ("/weather [city]",    "ASCII weather forecast"),
+            ("/timer 5m",          "Countdown timer (5m, 30s, 1h)"),
+        ]),
+        ("CODE & AI LAB", [
+            ("/explaincode",       "Paste code → AI explains every line"),
+            ("/roast",             "AI roasts your bad code (with fixes)"),
+            ("/rename <name>",     "AI suggests better variable/function names"),
+            ("/regex <desc>",      "AI writes a regex for you"),
+            ("/git <task>",        "AI gives exact git commands"),
+            ("/diff",              "Paste git diff → AI explains changes"),
+            ("/translate <l> <t>", "Translate text to any language"),
+            ("/challenge [level]", "Get a coding/hacking challenge"),
+            ("/ctf <data>",        "CTF challenge analyzer"),
+            ("/recap",             "Summary of this session"),
         ]),
         ("SESSION", [
             ("/clear",   "Clear history"),
@@ -524,8 +1032,594 @@ def save_history(path: str, history: list, maxh: int) -> None:
     except: pass
 
 # ══════════════════════════════════════════════════════════════
-#  SETUP WIZARD
+#  MEMORY SYSTEM — Remembers things between sessions
 # ══════════════════════════════════════════════════════════════
+MEMORY_PATH = os.path.expanduser("~/.cybersh_memory.json")
+
+def load_memory() -> dict:
+    try:
+        with open(MEMORY_PATH) as f: return json.load(f)
+    except Exception:
+        return {"facts": [], "preferences": {}, "projects": {}}
+
+def save_memory(mem: dict) -> None:
+    try:
+        with open(MEMORY_PATH, "w") as f: json.dump(mem, f, indent=2)
+    except Exception: pass
+
+def memory_context(mem: dict) -> str:
+    """Build a context string from memory to inject into AI system prompt."""
+    if not mem["facts"] and not mem["preferences"] and not mem["projects"]:
+        return ""
+    parts = ["[MEMORY — things the user told you to remember:]"]
+    if mem["facts"]:
+        parts.append("Facts: " + " | ".join(mem["facts"][-20:]))
+    if mem["preferences"]:
+        prefs = ", ".join(f"{k}={v}" for k, v in mem["preferences"].items())
+        parts.append(f"Preferences: {prefs}")
+    if mem["projects"]:
+        for name, info in list(mem["projects"].items())[-5:]:
+            parts.append(f"Project '{name}': {info}")
+    return "\n".join(parts)
+
+def cmd_remember(arg: str, mem: dict) -> None:
+    """Save something to persistent memory."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /remember <anything>{R}")
+        print(f"  Examples:")
+        print(f"    /remember my name is Ahmed")
+        print(f"    /remember I prefer Python 3.11")
+        print(f"    /remember project myapp is a flask REST API\n")
+        return
+    w   = min(cols(), 60)
+    div_line = f"{NEON_C}{'─'*w}{R}"
+
+    # detect project
+    if arg.lower().startswith("project "):
+        rest  = arg[8:].strip()
+        parts = rest.split(" ", 1)
+        name  = parts[0]
+        info  = parts[1] if len(parts) > 1 else ""
+        mem["projects"][name] = info
+        save_memory(mem)
+        print(f"\n{NEON_G}✓ Project '{name}' remembered.{R}\n")
+        return
+
+    # detect preference (key=value or "prefer X")
+    if "=" in arg and len(arg.split("=")) == 2:
+        k, v = arg.split("=", 1)
+        mem["preferences"][k.strip()] = v.strip()
+        save_memory(mem)
+        print(f"\n{NEON_G}✓ Preference saved: {k.strip()} = {v.strip()}{R}\n")
+        return
+
+    # general fact
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d")
+    fact = f"[{ts}] {arg}"
+    mem["facts"].append(fact)
+    if len(mem["facts"]) > 100: mem["facts"].pop(0)
+    save_memory(mem)
+    print(f"\n{NEON_G}✓ Remembered: {arg}{R}\n")
+
+def cmd_memories(mem: dict) -> None:
+    """Show everything in memory."""
+    w        = min(cols(), 65)
+    div_line = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div_line}")
+    print(f"{NEON_C}{BOLD}  🧠 Memory{R}")
+    print(div_line)
+
+    if not mem["facts"] and not mem["preferences"] and not mem["projects"]:
+        print(f"  {DIM}Nothing remembered yet. Use /remember <anything>{R}")
+        print(f"{div_line}\n"); return
+
+    if mem["facts"]:
+        print(f"\n  {NEON_Y}Facts:{R}")
+        for i, f in enumerate(mem["facts"][-15:], 1):
+            print(f"    {DIM}{i:>2}.{R} {f}")
+
+    if mem["preferences"]:
+        print(f"\n  {NEON_Y}Preferences:{R}")
+        for k, v in mem["preferences"].items():
+            print(f"    {NEON_C}{k}{R} = {v}")
+
+    if mem["projects"]:
+        print(f"\n  {NEON_Y}Projects:{R}")
+        for name, info in mem["projects"].items():
+            print(f"    {NEON_C}{name}{R}: {info}")
+
+    print(f"\n  {DIM}Use /forget <text> to remove something{R}")
+    print(f"{div_line}\n")
+
+def cmd_forget(arg: str, mem: dict) -> None:
+    """Remove something from memory."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /forget <keyword or project name>{R}\n"); return
+
+    removed = 0
+    # check projects
+    if arg in mem["projects"]:
+        del mem["projects"][arg]
+        removed += 1
+
+    # check preferences
+    if arg in mem["preferences"]:
+        del mem["preferences"][arg]
+        removed += 1
+
+    # check facts
+    before = len(mem["facts"])
+    mem["facts"] = [f for f in mem["facts"] if arg.lower() not in f.lower()]
+    removed += before - len(mem["facts"])
+
+    if removed:
+        save_memory(mem)
+        print(f"\n{NEON_G}✓ Removed {removed} memory item(s) matching '{arg}'{R}\n")
+    else:
+        print(f"\n{NEON_Y}⚠ Nothing found matching '{arg}'{R}\n")
+
+# ══════════════════════════════════════════════════════════════
+#  MOOD / PERSONALITY SYSTEM
+# ══════════════════════════════════════════════════════════════
+PERSONALITIES = {
+    "default":  "You are CYBER SH, a helpful AI assistant. Be concise and direct.",
+    "teacher":  "You are a patient teacher. Explain everything simply with analogies, never assume prior knowledge. After explaining, ask if the user understood.",
+    "hacker":   "You are an elite hacker mentor. Be direct, technical, use proper security terminology. Challenge the user to think deeper. Occasionally use l33tspeak for emphasis.",
+    "coach":    "You are an energetic life and productivity coach. Be encouraging, positive, break problems into small steps. Celebrate every win, no matter how small.",
+    "roaster":  "You are a brutally honest senior dev who roasts bad ideas and code with sharp humor — but ALWAYS follows up with the correct approach. Be funny, accurate, and genuinely helpful.",
+    "sherlock": "You are Sherlock Holmes. Make deductions from every detail the user gives you. Be dramatic, logical, brilliant. Say 'Elementary.' when something is obvious.",
+    "prof":     "You are a university professor — expert, thorough, academic but approachable. Use precise language, cite reasoning, structure answers clearly with examples.",
+    "eli5":     "You are explaining everything to a 5-year-old. Use the simplest words possible, fun analogies, and short sentences. Never use jargon.",
+    "pirate":   "You are a pirate who happens to be a genius programmer and hacker. Speak like a pirate (Arr, matey, etc.) but give genuinely expert technical advice.",
+    "stoic":    "You are a Stoic philosopher AI. Give wise, calm, measured responses. Reference Marcus Aurelius, Epictetus, Seneca where relevant. Focus on what the user can control.",
+}
+
+def cmd_persona(arg: str, cfg: dict) -> None:
+    """Switch AI personality."""
+    w = min(cols(), 60)
+    if not arg:
+        print(f"\n{NEON_C}{'─'*w}{R}")
+        print(f"{NEON_C}{BOLD}  🎭 Personalities{R}")
+        print(f"{NEON_C}{'─'*w}{R}")
+        for k, v in PERSONALITIES.items():
+            cur = f" {NEON_G}← active{R}" if cfg.get("persona","default") == k else ""
+            print(f"  {NEON_Y}{k:<12}{R}{DIM}{v[:55]}…{R}{cur}")
+        print(f"\n  {DIM}Usage: /persona teacher{R}")
+        print(f"{NEON_C}{'─'*w}{R}\n"); return
+    if arg not in PERSONALITIES:
+        close = [k for k in PERSONALITIES if k.startswith(arg[:3])]
+        hint  = f"  Did you mean: {close[0]}?" if close else ""
+        print(f"{NEON_R}✗ Unknown persona '{arg}'.{R}{hint}")
+        print(f"  Options: {', '.join(PERSONALITIES)}\n"); return
+    cfg["persona"] = arg
+    desc = PERSONALITIES[arg][:80]
+    bw   = min(cols(), 62)
+    print(f"\n{NEON_P}{'▓'*bw}")
+    print(f"{NEON_P}{BOLD}  🎭 PERSONA → {arg.upper()}{R}")
+    print(f"{NEON_P}{'▓'*bw}{R}")
+    print(f"  {DIM}{desc}…{R}\n")
+
+# ══════════════════════════════════════════════════════════════
+#  SMART SUMMARIZER
+# ══════════════════════════════════════════════════════════════
+def cmd_summarize_url(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Fetch a URL and AI summarizes it."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /summarize <url>{R}\n"); return ""
+    print(f"\n{NEON_C}🌐 Fetching {arg}…{R}\n")
+    r = subprocess.run(
+        ["curl", "-sL", "--max-time", "10",
+         "-A", "Mozilla/5.0", arg],
+        capture_output=True, text=True
+    )
+    if not r.stdout:
+        print(f"{NEON_R}✗ Could not fetch URL.{R}\n"); return ""
+    # strip HTML tags crudely
+    text = re.sub(r"<[^>]+>", " ", r.stdout)
+    text = re.sub(r"\s+", " ", text).strip()[:4000]
+    return ask(cfg, messages, session_msgs,
+        f"Summarize this webpage content in bullet points. "
+        f"Extract: main topic, key points, any important numbers or dates, and conclusion.\n\n{text}")
+
+# ══════════════════════════════════════════════════════════════
+#  QUICK MATH
+# ══════════════════════════════════════════════════════════════
+def cmd_calc(arg: str) -> None:
+    """Safe math evaluator."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /calc <expression>  e.g. /calc 2**32 or /calc 15% of 240{R}\n"); return
+    w   = min(cols(), 50)
+    div_line = f"{NEON_C}{'─'*w}{R}"
+
+    # handle "X% of Y"
+    pct = re.match(r"(\d+\.?\d*)%\s*of\s*(\d+\.?\d*)", arg.lower())
+    if pct:
+        a, b = float(pct.group(1)), float(pct.group(2))
+        result = a / 100 * b
+        print(f"\n  {NEON_C}{a}% of {b}{R} = {NEON_G}{BOLD}{result:,.4g}{R}\n")
+        return
+
+    # safe eval — only allow math chars
+    safe = re.sub(r"[^0-9+\-*/().% eE]", "", arg)
+    try:
+        result = eval(safe, {"__builtins__": {}})
+        print(f"\n{div_line}")
+        print(f"  {NEON_C}{arg}{R} = {NEON_G}{BOLD}{result:,}{R}")
+        print(f"{div_line}\n")
+    except Exception as e:
+        print(f"{NEON_R}✗ Math error: {e}{R}\n")
+
+# ══════════════════════════════════════════════════════════════
+#  DAILY GOALS
+# ══════════════════════════════════════════════════════════════
+GOALS_PATH = os.path.expanduser("~/.cybersh_goals.json")
+
+def load_goals() -> list:
+    try:
+        with open(GOALS_PATH) as f:
+            data = json.load(f)
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
+            return [g for g in data if g.get("date") == today]
+    except Exception: return []
+
+def save_goals(goals: list) -> None:
+    try:
+        with open(GOALS_PATH, "w") as f: json.dump(goals, f, indent=2)
+    except Exception: pass
+
+def cmd_goals(action: str, arg: str) -> None:
+    """Daily goal tracker."""
+    goals = load_goals()
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    w     = min(cols(), 55)
+    div_line = f"{NEON_C}{'─'*w}{R}"
+
+    if action in ("add", "") and arg:
+        goals.append({"date": today, "text": arg, "done": False})
+        save_goals(goals); print(f"{NEON_G}✓ Goal added.{R}\n"); return
+
+    if action in ("done", "check") and arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(goals):
+            goals[idx]["done"] = True
+            save_goals(goals); print(f"{NEON_G}✓ Marked done!{R}\n")
+        return
+
+    if action in ("clear", "reset"):
+        save_goals([]); print(f"{NEON_G}✓ Goals cleared.{R}\n"); return
+
+    # show
+    print(f"\n{div_line}")
+    print(f"{NEON_C}{BOLD}  🎯 Today's Goals — {today}{R}")
+    print(div_line)
+    if not goals:
+        print(f"  {DIM}No goals yet. Add one: /goals add <goal>{R}")
+    done = sum(1 for g in goals if g["done"])
+    for i, g in enumerate(goals, 1):
+        icon  = f"{NEON_G}✓{R}" if g["done"] else f"{NEON_Y}○{R}"
+        text  = f"{DIM}{g['text']}{R}" if g["done"] else g["text"]
+        print(f"  {icon} {i}. {text}")
+    if goals:
+        pct = int(100 * done / len(goals))
+        bar_w = 25; filled = int(bar_w * pct / 100)
+        bar = f"{NEON_G}{'█'*filled}{DIM}{'░'*(bar_w-filled)}{R}"
+        print(f"\n  {bar} {NEON_Y}{pct}%{R} ({done}/{len(goals)} done)")
+    print(f"\n  {DIM}/goals add <goal> | /goals done <n> | /goals clear{R}")
+    print(f"{div_line}\n")
+
+
+
+# ══════════════════════════════════════════════════════════════
+#  DAILY TIP
+# ══════════════════════════════════════════════════════════════
+TIPS = [
+    "Use `Ctrl+R` to search your bash history interactively.",
+    "Use `!!` to repeat the last command. `sudo !!` to run it as root.",
+    "Use `cd -` to go back to the previous directory.",
+    "Use `grep -r 'text' .` to search inside all files in a folder.",
+    "Use `man <command>` to read the full manual for any command.",
+    "Use `watch -n 1 <cmd>` to run a command every second and see output live.",
+    "Use `curl wttr.in` to check the weather in your terminal.",
+    "Use `history | grep <keyword>` to find old commands fast.",
+    "Use `tar -xzf file.tar.gz` to extract a .tar.gz file.",
+    "Use `df -h` to see disk space in human readable format.",
+    "Use `htop` for a beautiful interactive process monitor.",
+    "Use `ss -tulpn` to see all open ports and what's using them.",
+    "Use `find / -name '*.log' 2>/dev/null` to find all log files.",
+    "Use `alias ll='ls -la'` to create a shortcut command.",
+    "Use `screen` or `tmux` to keep sessions alive after disconnect.",
+    "Use `chmod +x script.sh && ./script.sh` to run a bash script.",
+    "Use `curl -O <url>` to download a file from the internet.",
+    "Use `zip -r archive.zip folder/` to zip an entire folder.",
+    "Use `wc -l file.txt` to count lines in a file.",
+    "Use `cut -d',' -f1 file.csv` to extract the first column of a CSV.",
+]
+
+def show_tip() -> None:
+    import random, hashlib
+    # same tip per day, changes daily
+    day_seed = datetime.datetime.now().strftime("%Y%m%d")
+    idx = int(hashlib.md5(day_seed.encode()).hexdigest(), 16) % len(TIPS)
+    tip = TIPS[idx]
+    w   = min(cols(), 70)
+    print(f"\n{NEON_Y}{'─'*w}")
+    print(f"  💡 Tip of the day")
+    print(f"{'─'*w}{R}")
+    print(f"  {tip}")
+    print(f"{NEON_Y}{'─'*w}{R}\n")
+
+def cmd_passgen(arg: str) -> None:
+    """Generate passwords, passphrases, or API keys."""
+    import random, string, secrets
+    w    = min(cols(), 60)
+    div  = f"{NEON_C}{'─'*w}{R}"
+    kind = arg.lower() if arg else "password"
+
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🔑 Password Generator{R}")
+    print(div)
+
+    if "phrase" in kind or "word" in kind:
+        words = ["alpha","bravo","charlie","delta","echo","foxtrot","golf","hotel",
+                 "india","juliet","kilo","lima","mike","november","oscar","paper",
+                 "router","signal","tango","ultra","victor","whiskey","xray","yankee",
+                 "zebra","rocket","flame","storm","pixel","ghost","blade","cipher",
+                 "tower","nexus","forge","prism","orbit","quartz","vault","warden"]
+        for _ in range(3):
+            phrase = "-".join(secrets.choice(words) for _ in range(4))
+            num    = secrets.randbelow(9999)
+            print(f"  {NEON_G}{phrase}-{num}{R}")
+    elif "api" in kind or "key" in kind or "token" in kind:
+        for _ in range(3):
+            key = secrets.token_hex(32)
+            print(f"  {NEON_G}{key}{R}")
+    else:
+        chars = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+        for length in (16, 24, 32):
+            pwd = "".join(secrets.choice(chars) for _ in range(length))
+            print(f"  {NEON_Y}[{length} chars]{R} {NEON_G}{pwd}{R}")
+
+    print(f"\n  {DIM}Usage: /passgen phrase | /passgen api | /passgen (default=password){R}")
+    print(f"{div}\n")
+
+def cmd_encode(arg: str) -> None:
+    """Encode/decode/hash text in multiple formats."""
+    import base64, hashlib, urllib.parse
+    if not arg:
+        print(f"{NEON_Y}Usage: /encode <text>  or  /encode decode <base64>{R}\n")
+        return
+
+    w   = min(cols(), 70)
+    div = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🔐 Encode / Hash{R}")
+    print(div)
+
+    # decode mode
+    if arg.lower().startswith("decode "):
+        raw = arg[7:].strip()
+        try:
+            b64 = base64.b64decode(raw).decode(errors="replace")
+            print(f"  {NEON_Y}Base64 decode:{R} {NEON_G}{b64}{R}")
+        except Exception:
+            print(f"  {NEON_R}✗ Not valid base64{R}")
+        try:
+            url = urllib.parse.unquote(raw)
+            print(f"  {NEON_Y}URL decode:    {R} {NEON_G}{url}{R}")
+        except Exception:
+            pass
+        print(f"{div}\n")
+        return
+
+    text = arg.encode()
+    b64  = base64.b64encode(text).decode()
+    hex_ = text.hex()
+    url  = urllib.parse.quote(arg)
+    md5  = hashlib.md5(text).hexdigest()
+    sha1 = hashlib.sha1(text).hexdigest()
+    sha256 = hashlib.sha256(text).hexdigest()
+
+    rows = [
+        ("Base64",  b64),
+        ("Hex",     hex_),
+        ("URL",     url),
+        ("MD5",     md5),
+        ("SHA1",    sha1),
+        ("SHA256",  sha256),
+    ]
+    for label, val in rows:
+        print(f"  {NEON_Y}{label:<10}{R} {NEON_G}{val}{R}")
+    print(f"\n  {DIM}Decode: /encode decode <base64>{R}")
+    print(f"{div}\n")
+
+def cmd_syswatch() -> None:
+    """Live CPU/RAM/Disk monitor — updates every second. Ctrl+C to stop."""
+    import time as _time
+    print(f"\n{NEON_C}  🖥  SYSWATCH — Live Monitor  {DIM}(Ctrl+C to stop){R}\n")
+    try:
+        while True:
+            # CPU
+            try:
+                with open("/proc/stat") as f: cpu1 = f.readline().split()
+                _time.sleep(0.5)
+                with open("/proc/stat") as f: cpu2 = f.readline().split()
+                idle1 = int(cpu1[4]); total1 = sum(int(x) for x in cpu1[1:])
+                idle2 = int(cpu2[4]); total2 = sum(int(x) for x in cpu2[1:])
+                cpu_pct = 100 * (1 - (idle2-idle1)/(total2-total1+0.001))
+            except Exception:
+                cpu_pct = 0.0
+
+            # RAM
+            try:
+                meminfo = {}
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        k, v = line.split(":")
+                        meminfo[k.strip()] = int(v.strip().split()[0])
+                total_ram  = meminfo.get("MemTotal", 1)
+                avail_ram  = meminfo.get("MemAvailable", 0)
+                used_ram   = total_ram - avail_ram
+                ram_pct    = 100 * used_ram / total_ram
+                ram_used_g = used_ram / 1048576
+                ram_tot_g  = total_ram / 1048576
+            except Exception:
+                ram_pct = 0.0; ram_used_g = 0; ram_tot_g = 0
+
+            # Disk
+            try:
+                st = os.statvfs("/")
+                disk_total = st.f_blocks * st.f_frsize
+                disk_free  = st.f_bavail * st.f_frsize
+                disk_used  = disk_total - disk_free
+                disk_pct   = 100 * disk_used / (disk_total + 1)
+                disk_used_g = disk_used / 1e9
+                disk_tot_g  = disk_total / 1e9
+            except Exception:
+                disk_pct = 0.0; disk_used_g = 0; disk_tot_g = 0
+
+            def bar(pct, width=30):
+                filled = int(width * pct / 100)
+                color  = NEON_G if pct < 60 else NEON_Y if pct < 85 else NEON_R
+                return f"{color}{'█'*filled}{DIM}{'░'*(width-filled)}{R} {color}{pct:5.1f}%{R}"
+
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            sys.stdout.write(f"\r\033[3A" if True else "")
+            print(f"\033[2K  {NEON_C}CPU {R} {bar(cpu_pct)}  {DIM}{now}{R}")
+            print(f"\033[2K  {NEON_C}RAM {R} {bar(ram_pct)}  {DIM}{ram_used_g:.1f}/{ram_tot_g:.1f} GB{R}")
+            print(f"\033[2K  {NEON_C}DISK{R} {bar(disk_pct)}  {DIM}{disk_used_g:.1f}/{disk_tot_g:.1f} GB{R}")
+            _time.sleep(0.5)
+    except KeyboardInterrupt:
+        print(f"\n{NEON_G}✓ Syswatch stopped.{R}\n")
+
+def cmd_benchmark() -> None:
+    """Quick CPU + RAM + disk benchmark."""
+    import time as _time, random
+    w   = min(cols(), 60)
+    div = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  ⚡ Benchmark{R}")
+    print(div)
+
+    # CPU
+    print(f"  {NEON_Y}CPU{R}  — calculating primes…", end="", flush=True)
+    t0 = _time.time()
+    primes = 0
+    for n in range(2, 50000):
+        if all(n % i for i in range(2, int(n**0.5)+1)): primes += 1
+    cpu_t = _time.time() - t0
+    cpu_score = int(3000 / (cpu_t + 0.001))
+    bar_w = 20; bar_f = min(bar_w, int(cpu_score / 50))
+    color = NEON_G if cpu_score > 1500 else NEON_Y if cpu_score > 800 else NEON_R
+    print(f"\r  {NEON_Y}CPU{R}  {color}{'█'*bar_f}{'░'*(bar_w-bar_f)}{R} {cpu_score} pts  {DIM}({cpu_t:.2f}s){R}")
+
+    # RAM
+    print(f"  {NEON_Y}RAM{R}  — read/write test…", end="", flush=True)
+    t0   = _time.time()
+    data = bytearray(50 * 1024 * 1024)  # 50MB
+    for i in range(0, len(data), 4096): data[i] = i % 256
+    _ = sum(data[::4096])
+    ram_t = _time.time() - t0
+    ram_score = int(500 / (ram_t + 0.001))
+    bar_f = min(bar_w, int(ram_score / 25))
+    color = NEON_G if ram_score > 300 else NEON_Y if ram_score > 150 else NEON_R
+    print(f"\r  {NEON_Y}RAM{R}  {color}{'█'*bar_f}{'░'*(bar_w-bar_f)}{R} {ram_score} pts  {DIM}({ram_t:.2f}s){R}")
+
+    # Disk
+    print(f"  {NEON_Y}DISK{R} — write test…", end="", flush=True)
+    tmp = os.path.expanduser("~/.cybersh_bench_tmp")
+    t0  = _time.time()
+    try:
+        with open(tmp, "wb") as f: f.write(os.urandom(20 * 1024 * 1024))
+        disk_t = _time.time() - t0
+        os.remove(tmp)
+        disk_score = int(200 / (disk_t + 0.001))
+    except Exception:
+        disk_t = 99; disk_score = 0
+    bar_f = min(bar_w, int(disk_score / 10))
+    color = NEON_G if disk_score > 100 else NEON_Y if disk_score > 50 else NEON_R
+    print(f"\r  {NEON_Y}DISK{R} {color}{'█'*bar_f}{'░'*(bar_w-bar_f)}{R} {disk_score} pts  {DIM}({disk_t:.2f}s){R}")
+
+    total = cpu_score + ram_score + disk_score
+    grade = "S" if total > 2500 else "A" if total > 1800 else "B" if total > 1200 else "C" if total > 700 else "D"
+    grade_color = {
+        "S": NEON_G, "A": NEON_G, "B": NEON_Y, "C": NEON_O, "D": NEON_R
+    }.get(grade, NEON_C)
+    print(div)
+    print(f"  {NEON_C}Total score:{R} {BOLD}{total}{R}  Grade: {grade_color}{BOLD}{grade}{R}")
+    print(f"{div}\n")
+
+def cmd_fix(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Paste any error and get an instant fix."""
+    error = arg or ""
+    if not error:
+        print(f"{NEON_Y}Paste the error message:{R} ", end=""); sys.stdout.flush()
+        error = input().strip()
+    if not error:
+        print(f"{NEON_Y}⚠ No error provided.{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Fix this error — give the exact command or code to solve it:\n\n{error}")
+
+def cmd_howto(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """How do I do X in Linux?"""
+    if not arg:
+        print(f"{NEON_Y}Usage: /howto <task>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"How do I {arg} in Linux? Give me the exact command(s) to run. "
+        f"Be concise — show the command first, then a one-line explanation.")
+
+def cmd_tldr(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Explain a command in plain English."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /tldr <command>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Explain the command `{arg}` in plain English — no jargon. "
+        f"Format: 1) What it does in one sentence. 2) Common examples with explanations. "
+        f"3) Any warnings or things to be careful about.")
+
+def cmd_notes(action: str, arg: str) -> None:
+    """Quick note-taking during sessions."""
+    notes_file = os.path.expanduser("~/.cybersh_notes.json")
+    try:
+        with open(notes_file) as f: notes = json.load(f)
+    except Exception:
+        notes = []
+
+    w   = min(cols(), 60)
+    div = f"{NEON_C}{'─'*w}{R}"
+
+    if action in ("add", "note", "") and arg:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        notes.append({"time": ts, "text": arg})
+        with open(notes_file, "w") as f: json.dump(notes, f, indent=2)
+        print(f"{NEON_G}✓ Note saved.{R}\n")
+    elif action in ("list", "show", "ls", ""):
+        if not notes:
+            print(f"{NEON_Y}No notes yet. Use: /note <text>{R}\n"); return
+        print(f"\n{div}")
+        print(f"{NEON_C}{BOLD}  📝 Notes{R}")
+        print(div)
+        for i, n in enumerate(notes[-20:], 1):
+            print(f"  {NEON_Y}{i:>2}.{R} {DIM}[{n['time']}]{R} {n['text']}")
+        print(f"{div}\n")
+    elif action in ("clear", "wipe"):
+        with open(notes_file, "w") as f: json.dump([], f)
+        print(f"{NEON_G}✓ Notes cleared.{R}\n")
+    elif action in ("del", "delete", "rm") and arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(notes):
+            removed = notes.pop(idx)
+            with open(notes_file, "w") as f: json.dump(notes, f, indent=2)
+            print(f"{NEON_G}✓ Deleted: {removed['text'][:50]}{R}\n")
+        else:
+            print(f"{NEON_R}✗ Note #{arg} not found.{R}\n")
+    else:
+        # treat whole arg as a note if no subcommand matched
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        text = (action + " " + arg).strip()
+        notes.append({"time": ts, "text": text})
+        with open(notes_file, "w") as f: json.dump(notes, f, indent=2)
+        print(f"{NEON_G}✓ Note saved.{R}\n")
+
 def setup_wizard(cfg: dict) -> None:
     print(f"\n{BOLD_C}{'─'*60}")
     print(f"  CYBER SH DIRECT — Setup Wizard")
@@ -657,21 +1751,45 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
 
     if not one_shot:
         startup_selector(cfg)
+        show_tip()
         print_banner(cfg)
 
+    mem          = load_memory()
     mode         = MODES.get(cfg.get("mode","chat"), MODES["chat"])
-    messages     = [{"role":"system","content":mode["system"]}]
+    messages     = [{"role":"system","content":""}]   # placeholder, filled below
     session_msgs : list = []
     last_response = ""
+
+    def _build_sys() -> str:
+        """Build the full system prompt: persona + mode + memory."""
+        m    = MODES.get(cfg.get("mode","chat"), MODES["chat"])
+        base = m["system"]
+        # inject memory
+        ctx = memory_context(mem)
+        if ctx:
+            base += f"\n\n{ctx}"
+        # persona overrides the personality part but keeps mode instructions
+        persona = cfg.get("persona","default")
+        if persona and persona != "default" and persona in PERSONALITIES:
+            base = PERSONALITIES[persona] + "\n\nAdditionally: " + base
+        return base
+
+    def rebuild_system() -> None:
+        messages[0]["content"] = _build_sys()
 
     def switch_mode(new_mode: str) -> None:
         nonlocal messages
         cfg["mode"] = new_mode
         m = MODES[new_mode]
-        messages = [{"role":"system","content":m["system"]}]
+        new_msgs = [{"role":"system","content":_build_sys()}]
+        messages.clear()
+        messages.extend(new_msgs)
         session_msgs.clear()
         bw = min(cols(), 62)
         print(f"\n{m['color']}{BOLD}{'▓'*bw}\n  {m['icon']}  MODE → {m['label']}\n{'▓'*bw}{R}\n")
+
+    # initialise system prompt now that helpers exist
+    rebuild_system()
 
     if one_shot:
         ask(cfg, messages, session_msgs, one_shot)
@@ -681,10 +1799,8 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
         mode = MODES.get(cfg.get("mode","chat"), MODES["chat"])
         cwd  = os.path.basename(os.getcwd()) or "~"
         try:
-            sys.stdout.write(f"{mode['color']}{BOLD}{mode['icon']}[{cwd}] ▶ {R}")
-            sys.stdout.flush()
-            user_input = input().strip()
-        except (EOFError, KeyboardInterrupt):
+            user_input = rich_prompt(mode["color"], mode["icon"], cwd)
+        except KeyboardInterrupt:
             print(f"\n{DIM}Stay safe out there.{R}\n"); break
 
         if not user_input: continue
@@ -699,6 +1815,29 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
 
         if cmd in ("/vibe","/sec","/code","/chat","/agent"):
             switch_mode(cmd[1:])
+        elif cmd == "/remember":
+            cmd_remember(arg, mem)
+            rebuild_system()
+        elif cmd in ("/memories", "/memory"):
+            cmd_memories(mem)
+        elif cmd == "/forget":
+            cmd_forget(arg, mem)
+            rebuild_system()
+        elif cmd == "/persona":
+            cmd_persona(arg, cfg)
+            rebuild_system()
+        elif cmd == "/summarize":
+            last_response = cmd_summarize_url(arg, cfg, messages, session_msgs)
+        elif cmd == "/calc":
+            cmd_calc(arg)
+        elif cmd in ("/goals", "/goal"):
+            parts2 = arg.split(maxsplit=1)
+            action = parts2[0] if parts2 else ""
+            arg2   = parts2[1] if len(parts2) > 1 else ""
+            if action not in ("done","check","clear","reset","add"):
+                cmd_goals("add", arg) if arg else cmd_goals("", "")
+            else:
+                cmd_goals(action, arg2)
         elif cmd in ("/exit","/quit","/q"):
             print(f"\n{DIM}Stay safe out there.{R}\n"); break
         elif cmd == "/help":     print_help()
@@ -809,6 +1948,55 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
                 last_response = ask(cfg, messages, session_msgs,
                     f"Analyze this CVE/vulnerability for bug bounty and pentesting:\n{results}\n\n"
                     f"Cover: severity, affected versions, exploit method, detection, mitigation.")
+        elif cmd == "/tldr":
+            last_response = cmd_tldr(arg, cfg, messages, session_msgs)
+        elif cmd == "/howto":
+            last_response = cmd_howto(arg, cfg, messages, session_msgs)
+        elif cmd == "/fix":
+            last_response = cmd_fix(arg, cfg, messages, session_msgs)
+        elif cmd == "/passgen":
+            cmd_passgen(arg)
+        elif cmd == "/encode":
+            cmd_encode(arg)
+        elif cmd == "/syswatch":
+            cmd_syswatch()
+        elif cmd == "/benchmark":
+            cmd_benchmark()
+        elif cmd in ("/note", "/notes"):
+            parts2 = arg.split(maxsplit=1)
+            action = parts2[0] if parts2 else ""
+            arg2   = parts2[1] if len(parts2) > 1 else ""
+            # if action is not a subcommand keyword treat whole arg as note text
+            if action not in ("list","show","ls","clear","wipe","del","delete","rm"):
+                cmd_notes(arg, "")
+            else:
+                cmd_notes(action, arg2)
+        elif cmd == "/tip":
+            show_tip()
+        elif cmd == "/explaincode":
+            last_response = cmd_explain_code(arg, cfg, messages, session_msgs)
+        elif cmd == "/roast":
+            last_response = cmd_roast(arg, cfg, messages, session_msgs)
+        elif cmd == "/challenge":
+            last_response = cmd_challenge(arg, cfg, messages, session_msgs)
+        elif cmd == "/recap":
+            cmd_recap(messages)
+        elif cmd == "/translate":
+            last_response = cmd_translate(arg, cfg, messages, session_msgs)
+        elif cmd == "/weather":
+            cmd_weather_ascii(arg)
+        elif cmd == "/timer":
+            cmd_timer(arg)
+        elif cmd == "/rename":
+            last_response = cmd_ai_rename(arg, cfg, messages, session_msgs)
+        elif cmd == "/regex":
+            last_response = cmd_regex(arg, cfg, messages, session_msgs)
+        elif cmd == "/git":
+            last_response = cmd_githelp(arg, cfg, messages, session_msgs)
+        elif cmd == "/ctf":
+            last_response = cmd_ctf(arg, cfg, messages, session_msgs)
+        elif cmd == "/diff":
+            last_response = cmd_diff_explain(arg, cfg, messages, session_msgs)
         elif cmd == "/models":
             print(f"\n{NEON_Y}{BOLD}Available models to download:{R}\n")
             for k, m in KNOWN_MODELS.items():
@@ -849,10 +2037,58 @@ def main() -> None:
     parser.add_argument("--ctx",         type=int)
     parser.add_argument("--threads",     type=int)
     parser.add_argument("--setup",       action="store_true", help="Run setup wizard")
-    parser.add_argument("--version",     action="version", version="CYBER SH DIRECT v1.0")
+    parser.add_argument("--update",      action="store_true", help="Force update from GitHub")
+    parser.add_argument("--no-update",   action="store_true", help="Skip update check")
+    parser.add_argument("--version",     action="version", version="CYBER SH DIRECT v1.2")
 
     args = parser.parse_args()
     cfg  = load_cfg()
+
+    if args.model:   cfg["model_path"]  = args.model
+    if args.temp:    cfg["temperature"] = args.temp
+    if args.mode:    cfg["mode"]        = args.mode
+    if args.ctx:     cfg["context"]     = args.ctx
+    if args.threads: cfg["threads"]     = args.threads
+
+    if args.setup:
+        setup_wizard(cfg); return
+
+    # auto-update: run on interactive startup unless --no-update
+    if not args.no_update and sys.stdin.isatty():
+        check_and_update(force=getattr(args, 'update', False))
+    elif getattr(args, 'update', False):
+        check_and_update(force=True); return
+
+    if not cfg.get("model_path") or not os.path.exists(cfg.get("model_path","")):
+        print(f"\n{NEON_Y}No model configured. Running setup…{R}\n")
+        setup_wizard(cfg)
+        if not cfg.get("model_path"): return
+
+    piped = ""
+    if not sys.stdin.isatty(): piped = sys.stdin.read().strip()
+
+    if args.prompt or piped:
+        mode     = MODES.get(cfg.get("mode","chat"), MODES["chat"])
+        messages = [{"role":"system","content":mode["system"]}]
+        sess     = []
+        prefix   = ""
+        if args.file:
+            try:
+                with open(os.path.expanduser(args.file),"r",errors="replace") as f:
+                    content = f.read(50000)
+                ext    = os.path.splitext(args.file)[1][1:] or ""
+                prefix = f"[FILE: {args.file}]\n```{ext}\n{content}\n```"
+            except Exception as e:
+                print(f"{NEON_R}✗ {e}{R}"); sys.exit(1)
+        prompt   = args.prompt or ""
+        if piped: prompt = f"{prompt}\n\nSTDIN:\n{piped}".strip()
+        response = ask(cfg, messages, sess, prompt, prefix=prefix)
+        if args.output and response:
+            with open(os.path.expanduser(args.output),"w") as f: f.write(response)
+            print(f"{NEON_G}✓ Saved → {args.output}{R}")
+        return
+
+    repl(cfg)
 
     if args.model:   cfg["model_path"]  = args.model
     if args.temp:    cfg["temperature"] = args.temp
