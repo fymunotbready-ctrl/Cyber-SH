@@ -44,6 +44,66 @@ def _is_online() -> bool:
             continue
     return False
 
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard — auto-detects Wayland/X11/macOS/WSL/termux."""
+    if not text:
+        return False
+
+    os_info = _detect_os()
+    system  = os_info["system"]
+
+    # build candidate clipboard tools in priority order based on environment
+    candidates = []
+
+    if system == "Darwin":
+        candidates = [["pbcopy"]]
+    elif system == "Linux":
+        is_wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
+        is_wsl     = "microsoft" in platform_release().lower() if platform_release() else False
+        if is_wsl:
+            candidates = [["clip.exe"]]
+        elif is_wayland:
+            candidates = [["wl-copy"], ["xclip","-selection","clipboard"], ["xsel","--clipboard","--input"]]
+        else:
+            candidates = [["xclip","-selection","clipboard"], ["xsel","--clipboard","--input"], ["wl-copy"]]
+    elif system == "Windows":
+        candidates = [["clip"]]
+
+    for cmd in candidates:
+        try:
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            p.communicate(text.encode(), timeout=5)
+            if p.returncode == 0:
+                print(f"{NEON_G}✓ Copied to clipboard! {DIM}(via {cmd[0]}){R}\n")
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    # nothing worked — give the right install command for THIS distro
+    pkg_mgr = os_info.get("pkg_mgr")
+    install_hints = {
+        "apt":    "sudo apt install wl-clipboard   # Wayland\nsudo apt install xclip         # X11",
+        "dnf":    "sudo dnf install wl-clipboard   # Wayland\nsudo dnf install xclip         # X11",
+        "pacman": "sudo pacman -S wl-clipboard     # Wayland\nsudo pacman -S xclip           # X11",
+        "zypper": "sudo zypper install wl-clipboard\nsudo zypper install xclip",
+        "apk":    "sudo apk add wl-clipboard",
+        "brew":   "brew install pbcopy   # usually pre-installed on macOS",
+    }
+    hint = install_hints.get(pkg_mgr, "Install xclip or wl-clipboard for your distro.")
+    print(f"{NEON_Y}⚠ No clipboard tool found on this system.{R}")
+    print(f"{DIM}{hint}{R}\n")
+    return False
+
+
+def platform_release() -> str:
+    """Safe wrapper for platform.release() — used to detect WSL."""
+    try:
+        import platform
+        return platform.release()
+    except Exception:
+        return ""
+
+
 def _detect_os() -> dict:
     import platform
     info = {
@@ -223,6 +283,11 @@ ALL_COMMANDS = [
     "/timer","/rename","/regex","/git","/ctf","/diff",
     "/remember","/memories","/memory","/forget",
     "/persona","/summarize","/calc","/goals","/goal",
+    "/session",
+    "/convert","/qr","/speedtest","/pwcheck",
+    "/debug","/review","/template","/gitlog",
+    "/hash","/headers","/osint","/wordlist",
+    "/think","/debate","/improve","/eli5",
     "--update","--no-update",
 ]
 
@@ -358,9 +423,9 @@ def cmd_recap(messages: list) -> None:
     print(f"{div}\n")
 
 def cmd_translate(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
-    """Translate any text to any language."""
+    """Translate any text to any language — single clean output, no looping."""
     if not arg:
-        print(f"{NEON_Y}Usage: /translate <lang> <text>")
+        print(f"{NEON_Y}Usage: /translate <language> <text>")
         print(f"Example: /translate arabic Hello how are you{R}\n")
         return ""
     parts = arg.split(maxsplit=1)
@@ -368,8 +433,31 @@ def cmd_translate(arg: str, cfg: dict, messages: list, session_msgs: list) -> st
     text  = parts[1] if len(parts) > 1 else ""
     if not text:
         print(f"{NEON_Y}Usage: /translate <language> <text>{R}\n"); return ""
-    return ask(cfg, messages, session_msgs,
-        f"Translate this to {lang}. Show only the translation, nothing else:\n{text}")
+
+    # isolated one-shot call — does NOT pollute main conversation history,
+    # which is what was causing repeated/looping translations on long chats
+    isolated_messages = [
+        {"role": "system", "content":
+            "You are a translation engine. Output ONLY the translated text. "
+            "No explanations, no notes, no repeating the original, no extra lines. "
+            "One clean translation and nothing else."},
+        {"role": "user", "content": f"Translate to {lang}:\n{text}"},
+    ]
+    w   = min(cols(), 60)
+    div = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🌍 Translate → {lang.title()}{R}")
+    print(div + "\n")
+    parts_out = []
+    try:
+        for token in stream_local(cfg, isolated_messages):
+            sys.stdout.write(token); sys.stdout.flush()
+            parts_out.append(token)
+    except KeyboardInterrupt:
+        print(f"\n{NEON_Y}[interrupted]{R}")
+    result = "".join(parts_out).strip()
+    print(f"\n\n{div}\n")
+    return result
 
 def cmd_weather_ascii(arg: str) -> None:
     """Fetch weather as ASCII art using wttr.in."""
@@ -571,10 +659,58 @@ def web_search(query: str, max_results: int = 5) -> str:
 # ══════════════════════════════════════════════════════════════
 #  MODES
 # ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  ENVIRONMENT CONTEXT — injected into every system prompt
+# ══════════════════════════════════════════════════════════════
+_ENV_CACHE = None
+
+def get_env_context() -> str:
+    """Build a short OS/environment description for the AI system prompt.
+    Cached after first call since OS doesn't change mid-session."""
+    global _ENV_CACHE
+    if _ENV_CACHE:
+        return _ENV_CACHE
+
+    os_info = _detect_os()
+    distro  = os_info.get("distro") or os_info.get("system","Unknown")
+    pkg_mgr = os_info.get("pkg_mgr")
+
+    pkg_examples = {
+        "apt":    "apt install <pkg>  (Debian/Ubuntu/Kali/Parrot)",
+        "dnf":    "dnf install <pkg>  (Fedora/RHEL)",
+        "pacman": "pacman -S <pkg>    (Arch/Manjaro)",
+        "zypper": "zypper install <pkg> (openSUSE)",
+        "apk":    "apk add <pkg>      (Alpine)",
+        "brew":   "brew install <pkg> (macOS)",
+    }
+    pkg_line = pkg_examples.get(pkg_mgr, "")
+
+    _ENV_CACHE = (
+        f"[SYSTEM ENVIRONMENT: The user is running {distro}. "
+        + (f"Their package manager is {pkg_mgr} — use '{pkg_line}' for install commands, "
+           f"NEVER suggest a different package manager. " if pkg_mgr else "")
+        + "Always tailor shell commands, package install instructions, and file paths "
+        + "to THIS exact OS. Do not assume Ubuntu/apt unless that is what was detected.]"
+    )
+    return _ENV_CACHE
+
+_GLOBAL_RULES = (
+    "\n\n[OUTPUT RULES — always follow:]\n"
+    "- Never repeat yourself or loop the same sentence/explanation more than once.\n"
+    "- If you notice you are about to repeat earlier content, STOP and move on.\n"
+    "- Be realistic and accurate — do not invent commands, flags, or facts that don't exist. "
+    "If unsure, say so briefly instead of guessing confidently.\n"
+    "- Write for BOTH beginners and professionals in the same answer: give the direct "
+    "technical answer first (for pros), then one short plain-English line clarifying "
+    "anything non-obvious (for beginners). Do not write two separate explanations.\n"
+    "- Polish every response: no filler, no restating the question, no unnecessary caveats. "
+    "Be direct, clean, and confident."
+)
+
 MODES = {
     "chat": {
         "icon": "💬", "label": "CHAT", "color": NEON_C,
-        "system": "You are CYBER SH AI , a sharp helpful local AI. Be concise and direct.",
+        "system": "You are CYBER SH AI, a sharp helpful local AI. Be concise and direct." + _GLOBAL_RULES,
     },
     "sec": {
         "icon": "🔐", "label": "SEC", "color": NEON_G,
@@ -582,21 +718,23 @@ MODES = {
             "You are an elite offensive security expert and bug bounty hunter. "
             "Help with recon, OSINT, XSS, SQLi, SSRF, LFI, RCE, IDOR, API testing, CVE analysis. "
             "Give real working commands and Python tools. Be technical and precise."
-        ),
+        ) + _GLOBAL_RULES,
     },
     "vibe": {
         "icon": "🎨", "label": "VIBE", "color": NEON_P,
         "system": (
             "You are an expert vibe coder. Build beautiful impressive projects fast. "
             "Write creative elegant code, suggest UI/UX aesthetics, color schemes, animations."
-        ),
+        ) + _GLOBAL_RULES,
     },
     "code": {
         "icon": "⚡", "label": "CODE", "color": NEON_Y,
         "system": (
-            "You are an expert software engineer. Write clean production-ready Python and bash. "
-            "Add error handling, comments, usage examples."
-        ),
+            "You are an elite software engineer — write production-grade code a senior dev "
+            "would ship. Add proper error handling, type hints where relevant, comments only "
+            "where they add real value, and a short usage example. Prefer clear correct code "
+            "over clever code. You are excellent at security-aware coding too."
+        ) + _GLOBAL_RULES,
     },
     "agent": {
         "icon": "🤖", "label": "AGENT", "color": NEON_O,
@@ -612,7 +750,7 @@ MODES = {
             "ACTION: read_file | <filepath>\n"
             "ACTION: make_dir | <path>\n"
             "Always explain what you're doing before each ACTION. User confirms each one."
-        ),
+        ) + _GLOBAL_RULES,
     },
 }
 
@@ -808,19 +946,48 @@ def build_prompt(messages: list, model_path: str) -> str:
     return "\n".join(parts)
 
 def stream_local(cfg: dict, messages: list):
-    """Stream tokens from local llama-cpp model."""
+    """Stream tokens from local llama-cpp model. Auto-stops on detected loops."""
     llm    = get_llm(cfg)
     prompt = build_prompt(messages, cfg["model_path"])
     stream = llm(
         prompt,
-        max_tokens  = cfg.get("max_tokens", 2048),
-        temperature = cfg.get("temperature", 0.7),
-        stream      = True,
-        stop        = ["<|user|>","<|end|>","[INST]","<|im_start|>user"],
+        max_tokens     = cfg.get("max_tokens", 2048),
+        temperature    = cfg.get("temperature", 0.7),
+        repeat_penalty = 1.3,     # discourage the model from repeating itself
+        frequency_penalty = 0.3,  # extra penalty for frequently-used tokens
+        stream         = True,
+        stop           = ["<|user|>","<|end|>","[INST]","<|im_start|>user"],
     )
-    for chunk in stream:
-        token = chunk["choices"][0].get("text","")
-        if token: yield token
+
+    # ── live loop detector ────────────────────────────────────
+    buf          = ""           # rolling text buffer for repetition checks
+    full_text    = ""
+    chunk_count  = 0
+    CHECK_EVERY  = 40           # check every N tokens
+    WINDOW       = 200          # how much recent text to scan
+    MIN_PHRASE   = 25           # minimum repeated phrase length to count as a loop
+
+    for piece in stream:
+        token = piece["choices"][0].get("text","")
+        if not token:
+            continue
+        full_text   += token
+        buf         += token
+        chunk_count += 1
+        yield token
+
+        if chunk_count % CHECK_EVERY == 0 and len(full_text) > WINDOW * 2:
+            recent = full_text[-WINDOW*2:]
+            # check if the last WINDOW chars repeat earlier in `recent`
+            tail = recent[-WINDOW:]
+            head = recent[:-WINDOW]
+            # look for a long common substring = loop
+            if len(tail) >= MIN_PHRASE:
+                probe = tail[:MIN_PHRASE]
+                if probe in head:
+                    # confirmed repetition — stop generation
+                    yield "\n\n⚠ [stopped: repetition detected]"
+                    return
 
 # ══════════════════════════════════════════════════════════════
 #  AGENT ENGINE
@@ -1048,6 +1215,37 @@ def print_help() -> None:
             ("/persona coach",        "Motivating life coach"),
             ("/persona roaster",      "Roasts bad ideas (with fixes)"),
             ("/persona sherlock",     "Sherlock Holmes mode"),
+        ]),
+        ("🌍 EVERYDAY", [
+            ("/convert 100 km to miles", "Convert units, temperature, data, time"),
+            ("/qr <text>",               "Generate QR code in terminal"),
+            ("/speedtest",               "Test your internet speed + latency"),
+            ("/pwcheck <password>",      "AI rates your password strength"),
+        ]),
+        ("👨‍💻 DEVELOPER", [
+            ("/debug",                   "Paste broken code, AI finds every bug"),
+            ("/review",                  "Full code review — bugs, security, performance"),
+            ("/template flask api",      "Generate a production-ready project template"),
+            ("/gitlog",                  "AI summarizes your recent git commits"),
+        ]),
+        ("🔐 SECURITY", [
+            ("/hash <hash>",             "Identify hash type + attempt crack"),
+            ("/headers <url>",           "Check HTTP security headers of any site"),
+            ("/osint <username>",        "Full OSINT checklist for a target"),
+            ("/wordlist <theme>",        "Generate targeted password wordlist"),
+        ]),
+        ("🤖 AI TOOLS", [
+            ("/think <question>",        "AI thinks step by step before answering"),
+            ("/debate <topic>",          "AI argues both sides of any topic"),
+            ("/improve",                 "AI rewrites your text to be cleaner"),
+            ("/eli5 <topic>",            "Explain anything like you are 5"),
+        ]),
+        ("💾 SESSIONS", [
+            ("/session save <name>",    "Save current chat with a name"),
+            ("/session list",           "Show all saved sessions"),
+            ("/session load <n>",       "Load session by number or name"),
+            ("/session search <word>",  "Search all sessions for a keyword"),
+            ("/session delete <n>",     "Delete a saved session"),
         ]),
         ("🎯 PRODUCTIVITY", [
             ("/goals",                "Show today's goals"),
@@ -1642,6 +1840,257 @@ def cmd_benchmark() -> None:
     print(f"  {NEON_C}Total score:{R} {BOLD}{total}{R}  Grade: {grade_color}{BOLD}{grade}{R}")
     print(f"{div}\n")
 
+
+# ══════════════════════════════════════════════════════════════
+#  SESSION SYSTEM — Save, list, load, search past chats
+# ══════════════════════════════════════════════════════════════
+SESSIONS_DIR = os.path.expanduser("~/.cybersh_sessions")
+
+def _ensure_sessions_dir() -> None:
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+def session_save(name: str, messages: list, cfg: dict) -> None:
+    """Save current conversation to a named session file."""
+    _ensure_sessions_dir()
+    w   = min(shutil.get_terminal_size((80,24)).columns, 60)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    if not name:
+        print(f"{NEON_Y}Usage: /session save <name>{R}")
+        print(f"  Example: /session save pentest-example-com{chr(10)}")
+        return
+
+    # only keep user/assistant messages, skip system
+    convo = [m for m in messages if m["role"] in ("user","assistant")]
+    if not convo:
+        print(f"{NEON_Y}⚠ Nothing to save — conversation is empty.{R}{chr(10)}")
+        return
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    ts        = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename  = f"{safe_name}__{ts}.json"
+    path      = os.path.join(SESSIONS_DIR, filename)
+
+    data = {
+        "name":     name,
+        "saved_at": ts,
+        "mode":     cfg.get("mode","chat"),
+        "messages": convo,
+        "turns":    len([m for m in convo if m["role"]=="user"]),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    print(f"{chr(10)}{div}")
+    print(f"{NEON_G}{chr(9608*0+9787)}  Session saved: {name}{R}")
+    print(f"  {DIM}{len(data[chr(109)+chr(101)+chr(115)+chr(115)+chr(97)+chr(103)+chr(101)+chr(115)])} messages · {data[chr(116)+chr(117)+chr(114)+chr(110)+chr(115)]} turns · {ts}{R}")
+    print(f"{div}{chr(10)}")
+
+def session_list() -> list:
+    """List all saved sessions."""
+    _ensure_sessions_dir()
+    w   = min(shutil.get_terminal_size((80,24)).columns, 68)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
+    if not files:
+        print(f"{chr(10)}{NEON_Y}No saved sessions yet.{R}")
+        print(f"{DIM}Save one with: /session save <name>{R}{chr(10)}")
+        return []
+
+    print(f"{chr(10)}{div}")
+    print(f"{NEON_C}{BOLD}  💾 Saved Sessions{R}")
+    print(div)
+    sessions = []
+    for i, fpath in enumerate(files[:20], 1):
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                d = json.load(f)
+            name    = d.get("name","?")
+            ts      = d.get("saved_at","?")
+            mode    = d.get("mode","chat")
+            turns   = d.get("turns", len([m for m in d.get("messages",[]) if m["role"]=="user"]))
+            mode_icon = {"chat":"💬","sec":"🔐","code":"⚡","vibe":"🎨","agent":"🤖"}.get(mode,"💬")
+            print(f"  {NEON_Y}[{i:>2}]{R} {mode_icon} {NEON_C}{name:<25}{R} {DIM}{turns} turns · {ts}{R}")
+            sessions.append(fpath)
+        except Exception:
+            pass
+    print(f"{chr(10)}  {DIM}Load with: /session load <number>{R}")
+    print(f"  {DIM}Search with: /session search <keyword>{R}")
+    print(f"  {DIM}Delete with: /session delete <number>{R}")
+    print(f"{div}{chr(10)}")
+    return sessions
+
+def session_load(arg: str, messages: list, session_msgs: list, cfg: dict) -> None:
+    """Load a session and merge it into current conversation."""
+    _ensure_sessions_dir()
+    files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
+    w     = min(shutil.get_terminal_size((80,24)).columns, 60)
+    div   = f"{NEON_C}{chr(9472)*w}{R}"
+
+    if not arg:
+        print(f"{NEON_Y}Usage: /session load <number> or /session load <name>{R}{chr(10)}")
+        session_list()
+        return
+
+    target = None
+    # try by number
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(files):
+            target = files[idx]
+    else:
+        # try by name match
+        for f in files:
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    d = json.load(fh)
+                if arg.lower() in d.get("name","").lower():
+                    target = f; break
+            except Exception:
+                pass
+
+    if not target:
+        print(f"{NEON_R}✗ Session not found: {arg}{R}{chr(10)}")
+        session_list()
+        return
+
+    try:
+        with open(target, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"{NEON_R}✗ Could not load session: {e}{R}{chr(10)}")
+        return
+
+    old_msgs = data.get("messages", [])
+    name     = data.get("name","?")
+    ts       = data.get("saved_at","?")
+    turns    = data.get("turns", len([m for m in old_msgs if m["role"]=="user"]))
+
+    print(f"{chr(10)}{div}")
+    print(f"{NEON_G}{BOLD}  📂 Loading session: {name}{R}")
+    print(f"  {DIM}{turns} turns from {ts} — merging into current chat{R}")
+    print(div)
+
+    # inject old messages right after system prompt, before current conversation
+    # messages[0] is always the system prompt
+    system_msg  = messages[0] if messages else {"role":"system","content":""}
+    current_convo = [m for m in messages[1:] if m["role"] in ("user","assistant")]
+
+    # build merged: system + old + separator context + current
+    separator = {
+        "role": "user",
+        "content": f"[LOADED SESSION: '{name}' from {ts}. The above messages are from a previous conversation. Continue helping me based on both the old context and our current conversation.]"
+    }
+    sep_reply = {
+        "role": "assistant",
+        "content": f"Got it. I can see your previous session '{name}' and will use that context alongside our current conversation."
+    }
+
+    messages.clear()
+    messages.append(system_msg)
+    messages.extend(old_msgs)
+    messages.append(separator)
+    messages.append(sep_reply)
+    messages.extend(current_convo)
+
+    print(f"  {NEON_G}✓ Merged {len(old_msgs)} old messages into current chat{R}")
+    print(f"  {DIM}The AI now remembers both sessions.{R}")
+    print(f"{div}{chr(10)}")
+
+def session_search(keyword: str) -> None:
+    """Search all saved sessions for a keyword."""
+    _ensure_sessions_dir()
+    if not keyword:
+        print(f"{NEON_Y}Usage: /session search <keyword>{R}{chr(10)}"); return
+
+    files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
+    w     = min(shutil.get_terminal_size((80,24)).columns, 68)
+    div   = f"{NEON_C}{chr(9472)*w}{R}"
+    found = 0
+
+    print(f"{chr(10)}{div}")
+    print(f"{NEON_C}{BOLD}  🔍 Search: {keyword}{R}")
+    print(div)
+
+    for fpath in files:
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                data = json.load(f)
+            name = data.get("name","?")
+            ts   = data.get("saved_at","?")
+            hits = []
+            for msg in data.get("messages",[]):
+                content = msg.get("content","")
+                if keyword.lower() in content.lower():
+                    # find the snippet around the keyword
+                    idx   = content.lower().find(keyword.lower())
+                    start = max(0, idx-40)
+                    end   = min(len(content), idx+80)
+                    snip  = content[start:end].replace(chr(10)," ").strip()
+                    role  = "You" if msg["role"]=="user" else "AI"
+                    hits.append((role, snip))
+
+            if hits:
+                found += len(hits)
+                print(f"{chr(10)}  {NEON_Y}📁 {name}{R} {DIM}({ts}){R}")
+                for role, snip in hits[:3]:
+                    role_color = NEON_C if role=="You" else NEON_G
+                    print(f"    {role_color}{role}:{R} {DIM}…{snip}…{R}")
+                if len(hits) > 3:
+                    print(f"    {DIM}+ {len(hits)-3} more matches{R}")
+        except Exception:
+            pass
+
+    if found == 0:
+        print(f"  {DIM}No matches found for: {keyword}{R}")
+    else:
+        print(f"{chr(10)}  {NEON_G}✓ Found {found} match(es){R}")
+    print(f"{div}{chr(10)}")
+
+def session_delete(arg: str) -> None:
+    """Delete a saved session by number or name."""
+    _ensure_sessions_dir()
+    files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
+
+    if not arg:
+        print(f"{NEON_Y}Usage: /session delete <number>{R}{chr(10)}")
+        session_list(); return
+
+    target = None
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(files): target = files[idx]
+    else:
+        for f in files:
+            if arg.lower() in os.path.basename(f).lower():
+                target = f; break
+
+    if not target:
+        print(f"{NEON_R}✗ Session not found: {arg}{R}{chr(10)}"); return
+
+    name = os.path.basename(target)
+    os.remove(target)
+    print(f"{chr(10)}{NEON_G}✓ Deleted session: {name}{R}{chr(10)}")
+
+def cmd_session(action: str, arg: str, messages: list,
+                session_msgs: list, cfg: dict) -> None:
+    """Router for all /session subcommands."""
+    a = action.lower() if action else "list"
+    if a in ("save","s"):
+        session_save(arg, messages, cfg)
+    elif a in ("list","ls",""):
+        session_list()
+    elif a in ("load","open","l"):
+        session_load(arg, messages, session_msgs, cfg)
+    elif a in ("search","find","f"):
+        session_search(arg)
+    elif a in ("delete","del","rm","remove"):
+        session_delete(arg)
+    else:
+        # treat whole thing as a name to load if it looks like one
+        session_load(action + (" " + arg if arg else ""), messages, session_msgs, cfg)
+
 def cmd_fix(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
     """Paste any error and get an instant fix."""
     error = arg or ""
@@ -1669,6 +2118,847 @@ def cmd_tldr(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
         f"Explain the command `{arg}` in plain English — no jargon. "
         f"Format: 1) What it does in one sentence. 2) Common examples with explanations. "
         f"3) Any warnings or things to be careful about.")
+
+
+# ══════════════════════════════════════════════════════════════
+#  EVERYDAY TOOLS
+# ══════════════════════════════════════════════════════════════
+
+def cmd_convert(arg: str) -> None:
+    """Convert units, temperature, and common values."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /convert <value> <from> to <to>")
+        print(f"  Examples:")
+        print(f"    /convert 100 km to miles")
+        print(f"    /convert 37 celsius to fahrenheit")
+        print(f"    /convert 1024 mb to gb")
+        print(f"    /convert 5 hours to minutes{R}\n")
+        return
+
+    w   = min(cols(), 55)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    # parse: value from_unit to to_unit
+    m = re.match(r"([\d.]+)\s+(.+?)\s+to\s+(.+)", arg.lower().strip())
+    if not m:
+        print(f"{NEON_R}✗ Format: /convert <value> <unit> to <unit>{R}\n"); return
+
+    val   = float(m.group(1))
+    frm   = m.group(2).strip()
+    to    = m.group(3).strip()
+    result = None; label = ""
+
+    # temperature
+    if frm in ("c","celsius","°c") and to in ("f","fahrenheit","°f"):
+        result = val * 9/5 + 32; label = "°F"
+    elif frm in ("f","fahrenheit","°f") and to in ("c","celsius","°c"):
+        result = (val - 32) * 5/9; label = "°C"
+    elif frm in ("c","celsius") and to in ("k","kelvin"):
+        result = val + 273.15; label = "K"
+    elif frm in ("k","kelvin") and to in ("c","celsius"):
+        result = val - 273.15; label = "°C"
+
+    # distance
+    elif frm in ("km","kilometers","kilometres") and to in ("mi","miles","mile"):
+        result = val * 0.621371; label = "miles"
+    elif frm in ("mi","miles","mile") and to in ("km","kilometers","kilometres"):
+        result = val * 1.60934; label = "km"
+    elif frm in ("m","meters","metres") and to in ("ft","feet","foot"):
+        result = val * 3.28084; label = "ft"
+    elif frm in ("ft","feet","foot") and to in ("m","meters","metres"):
+        result = val * 0.3048; label = "m"
+    elif frm in ("cm","centimeters") and to in ("in","inches","inch"):
+        result = val * 0.393701; label = "inches"
+    elif frm in ("in","inches","inch") and to in ("cm","centimeters"):
+        result = val * 2.54; label = "cm"
+
+    # weight
+    elif frm in ("kg","kilograms") and to in ("lb","lbs","pounds"):
+        result = val * 2.20462; label = "lbs"
+    elif frm in ("lb","lbs","pounds") and to in ("kg","kilograms"):
+        result = val * 0.453592; label = "kg"
+    elif frm in ("g","grams") and to in ("oz","ounces"):
+        result = val * 0.035274; label = "oz"
+
+    # data
+    elif frm in ("mb","megabytes") and to in ("gb","gigabytes"):
+        result = val / 1024; label = "GB"
+    elif frm in ("gb","gigabytes") and to in ("mb","megabytes"):
+        result = val * 1024; label = "MB"
+    elif frm in ("gb","gigabytes") and to in ("tb","terabytes"):
+        result = val / 1024; label = "TB"
+    elif frm in ("tb","terabytes") and to in ("gb","gigabytes"):
+        result = val * 1024; label = "GB"
+    elif frm in ("kb","kilobytes") and to in ("mb","megabytes"):
+        result = val / 1024; label = "MB"
+    elif frm in ("mb","megabytes") and to in ("kb","kilobytes"):
+        result = val * 1024; label = "KB"
+    elif frm in ("bytes","byte") and to in ("kb","kilobytes"):
+        result = val / 1024; label = "KB"
+
+    # time
+    elif frm in ("hours","hour","hr","h") and to in ("minutes","minute","min","m"):
+        result = val * 60; label = "minutes"
+    elif frm in ("minutes","minute","min") and to in ("hours","hour","hr","h"):
+        result = val / 60; label = "hours"
+    elif frm in ("hours","hour","hr") and to in ("seconds","second","sec","s"):
+        result = val * 3600; label = "seconds"
+    elif frm in ("days","day","d") and to in ("hours","hour","hr","h"):
+        result = val * 24; label = "hours"
+    elif frm in ("weeks","week","wk") and to in ("days","day","d"):
+        result = val * 7; label = "days"
+
+    # speed
+    elif frm in ("kmh","km/h","kph") and to in ("mph","mi/h"):
+        result = val * 0.621371; label = "mph"
+    elif frm in ("mph","mi/h") and to in ("kmh","km/h","kph"):
+        result = val * 1.60934; label = "km/h"
+    elif frm in ("m/s","mps") and to in ("kmh","km/h","kph"):
+        result = val * 3.6; label = "km/h"
+
+    print(f"\n{div}")
+    if result is not None:
+        print(f"  {NEON_Y}{val:g} {frm}{R} = {NEON_G}{BOLD}{result:,.4g} {label}{R}")
+    else:
+        print(f"  {NEON_R}✗ Conversion not supported: {frm} → {to}{R}")
+        print(f"  {DIM}Supported: temperature, distance, weight, data, time, speed{R}")
+    print(f"{div}\n")
+
+
+def cmd_qr(arg: str) -> None:
+    """Generate a QR code in the terminal as ASCII blocks."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /qr <text or url>{R}\n"); return
+    try:
+        import urllib.request, urllib.parse
+        encoded = urllib.parse.quote(arg)
+        url     = f"https://qrcode.show/{encoded}"
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "5", "-H", "Accept: text/plain", url],
+            capture_output=True, text=True
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            w   = min(cols(), 60)
+            div = f"{NEON_C}{chr(9472)*w}{R}"
+            print(f"\n{div}")
+            print(f"{NEON_C}{BOLD}  QR Code: {arg[:40]}{R}")
+            print(div)
+            print(r.stdout)
+            print(f"{div}\n")
+        else:
+            raise Exception("no output")
+    except Exception:
+        # fallback: manual QR using qrencode if available
+        r2 = subprocess.run(
+            ["qrencode", "-t", "UTF8", "-o", "-", arg],
+            capture_output=True, text=True
+        )
+        if r2.returncode == 0:
+            print(r2.stdout)
+        else:
+            print(f"{NEON_Y}  Install qrencode for offline QR:{R}")
+            print(f"  {NEON_C}sudo apt install qrencode{R}\n")
+
+
+def cmd_speedtest() -> None:
+    """Quick internet speed test using curl."""
+    import time as _time
+    w   = min(cols(), 55)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🌐 Speed Test{R}")
+    print(div)
+
+    test_url = "https://speed.cloudflare.com/__down?bytes=10000000"  # 10MB
+    print(f"  {DIM}Downloading 10MB from Cloudflare…{R}", end="", flush=True)
+    t0 = _time.time()
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{size_download}",
+             "--max-time", "15", test_url],
+            capture_output=True, text=True, timeout=20
+        )
+        elapsed = _time.time() - t0
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            bytes_dl  = int(r.stdout.strip())
+            mbps      = (bytes_dl * 8) / (elapsed * 1_000_000)
+            bar_w     = 25
+            fill      = min(bar_w, int(bar_w * mbps / 200))
+            color     = NEON_G if mbps > 50 else NEON_Y if mbps > 10 else NEON_R
+            bar       = f"{color}{'█'*fill}{DIM}{'░'*(bar_w-fill)}{R}"
+            grade     = "🚀 Fast" if mbps > 100 else "✅ Good" if mbps > 25 else "⚠️  Slow" if mbps > 5 else "🐌 Very slow"
+            print(f"\r  {NEON_Y}Download:{R} {bar} {color}{BOLD}{mbps:.1f} Mbps{R}  {grade}")
+            print(f"  {DIM}Time: {elapsed:.1f}s · Data: {bytes_dl//1024//1024}MB{R}")
+        else:
+            print(f"\r  {NEON_R}✗ Test failed.{R}")
+    except Exception as e:
+        print(f"\r  {NEON_R}✗ Error: {e}{R}")
+
+    # ping test
+    print(f"  {DIM}Testing latency…{R}", end="", flush=True)
+    try:
+        r2 = subprocess.run(
+            ["ping", "-c", "4", "-q", "8.8.8.8"],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in r2.stdout.splitlines():
+            if "min/avg/max" in line or "rtt" in line.lower():
+                parts = line.split("/")
+                if len(parts) >= 5:
+                    avg_ms = parts[4] if "/" in line else parts[1]
+                    ping_c = NEON_G if float(avg_ms.strip()) < 50 else NEON_Y if float(avg_ms.strip()) < 100 else NEON_R
+                    print(f"\r  {NEON_Y}Latency: {R}{ping_c}{BOLD}{avg_ms.strip()} ms avg{R}              ")
+    except Exception:
+        print(f"\r  {DIM}Latency test skipped.{R}          ")
+    print(f"{div}\n")
+
+
+def cmd_pwcheck(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI rates password strength using real entropy + rule checks."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /pwcheck <password>{R}\n"); return ""
+    term_w = min(cols(), 55)
+    div    = f"{NEON_C}{'─'*term_w}{R}"
+
+    COMMON_WORDS = ["password","123456","qwerty","admin","letmein",
+                    "welcome","monkey","dragon","master","iloveyou"]
+
+    # local checks first — use a name that can't collide with terminal width
+    checks = {
+        "length >= 12":     len(arg) >= 12,
+        "uppercase":        any(c.isupper() for c in arg),
+        "lowercase":        any(c.islower() for c in arg),
+        "numbers":          any(c.isdigit() for c in arg),
+        "symbols":          any(c in "!@#$%^&*()-_=+[]{}|;:,.<>?" for c in arg),
+        "no common words":  not any(word in arg.lower() for word in COMMON_WORDS),
+        "no simple sequence": not re.search(r"(0123|1234|2345|3456|4567|5678|6789|abcd|qwer)", arg.lower()),
+        "no repeated chars":  not re.search(r"(.)\1{2,}", arg),  # aaa, 111, etc.
+    }
+
+    # real entropy calculation (bits)
+    import math
+    pool = 0
+    if any(c.islower() for c in arg): pool += 26
+    if any(c.isupper() for c in arg): pool += 26
+    if any(c.isdigit() for c in arg): pool += 10
+    if any(c in "!@#$%^&*()-_=+[]{}|;:,.<>?/" for c in arg): pool += 32
+    entropy = len(arg) * math.log2(pool) if pool else 0
+
+    passed = sum(checks.values())
+    rule_score = passed / len(checks) * 100
+    # blend rule score with entropy (entropy capped at 100 around 80 bits)
+    entropy_score = min(100, entropy / 80 * 100)
+    score = int((rule_score + entropy_score) / 2)
+
+    color = NEON_G if score >= 75 else NEON_Y if score >= 45 else NEON_R
+    grade = "Strong 💪" if score >= 75 else "Medium ⚠️" if score >= 45 else "Weak ❌"
+
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🔑 Password Strength Check{R}")
+    print(div)
+    for label, ok in checks.items():
+        icon = f"{NEON_G}✓{R}" if ok else f"{NEON_R}✗{R}"
+        print(f"  {icon} {label}")
+    print(f"  {DIM}Entropy: {entropy:.0f} bits{R}")
+    bar_w = 20; fill = int(bar_w * score / 100)
+    print(f"\n  {color}{'█'*fill}{'░'*(bar_w-fill)}{R}  {color}{BOLD}{score}% — {grade}{R}")
+    print(f"{div}\n")
+
+    failed = [k for k,v in checks.items() if not v]
+    return ask(cfg, messages, session_msgs,
+        f"A password was checked with these RULE-BASED results (do not contradict these facts):\n"
+        f"Score: {score}/100 ({grade})\n"
+        f"Entropy: {entropy:.0f} bits\n"
+        f"Checks PASSED: {[k for k,v in checks.items() if v]}\n"
+        f"Checks FAILED: {failed if failed else 'none — all checks passed'}\n\n"
+        f"Give a SHORT analysis that is consistent with the score above: "
+        f"1) One line verdict matching the grade ({grade}). "
+        f"2) The specific weaknesses from the FAILED list only — do not invent others. "
+        f"3) A concrete stronger example password in similar style. "
+        f"Never reveal or repeat the original password.")
+
+
+# ══════════════════════════════════════════════════════════════
+#  DEVELOPER TOOLS
+# ══════════════════════════════════════════════════════════════
+
+def cmd_debug(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Paste broken code, AI finds and explains every bug."""
+    code = arg
+    if not code:
+        print(f"{NEON_Y}Paste your broken code (type END on a new line when done):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        code = "\n".join(lines)
+    if not code: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Debug this code. Find EVERY bug, error, and problem:\n\n```\n{code}\n```\n\n"
+        f"Format: 1) List each bug with line number and what's wrong. "
+        f"2) Explain WHY it breaks. 3) Show the fully fixed code.")
+
+
+def cmd_review(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Full code review — bugs, security, performance, style."""
+    code = arg
+    if not code:
+        print(f"{NEON_Y}Paste your code for review (END to finish):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        code = "\n".join(lines)
+    if not code: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Do a thorough code review of this code:\n\n```\n{code}\n```\n\n"
+        f"Cover these sections:\n"
+        f"🐛 BUGS — any errors or logic problems\n"
+        f"🔐 SECURITY — vulnerabilities, injection risks, exposed secrets\n"
+        f"⚡ PERFORMANCE — slow parts, unnecessary loops, memory issues\n"
+        f"📖 READABILITY — naming, comments, structure\n"
+        f"✅ GOOD — what is done well\n"
+        f"Give a score out of 10 at the end.")
+
+
+def cmd_template(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Generate a production-ready project template."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /template <type>")
+        print(f"  Examples:")
+        print(f"    /template flask api")
+        print(f"    /template fastapi")
+        print(f"    /template python cli")
+        print(f"    /template bash script")
+        print(f"    /template react app{R}\n")
+        return ""
+    return ask(cfg, messages, session_msgs,
+        f"Generate a complete, production-ready {arg} project template.\n"
+        f"Include: proper file structure, all necessary files with content, "
+        f"error handling, comments, a requirements.txt or equivalent, "
+        f"and a short README explaining how to run it. "
+        f"Make it something a real developer would actually use.")
+
+
+def cmd_gitlog(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Run git log locally or fetch commits from a GitHub repo URL."""
+    w   = min(cols(), 68)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    github_url = arg.strip() if arg else ""
+    if "github.com" in github_url:
+        m = re.search(r"github\.com[:/]([^/]+)/([^/.\s]+)", github_url)
+        if not m:
+            print(f"{NEON_R}✗ Could not parse GitHub URL.{R}\n"); return ""
+        owner, repo = m.group(1), m.group(2).replace(".git","")
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=20"
+        print(f"\n{NEON_C}🌐 Fetching commits: {owner}/{repo}…{R}\n")
+        data = _http_get(api_url)
+        if not data:
+            print(f"{NEON_R}✗ Could not reach GitHub API.{R}\n"); return ""
+        try:
+            commits = json.loads(data)
+            if isinstance(commits, dict) and "message" in commits:
+                print(f"{NEON_R}✗ GitHub API: {commits['message']}{R}\n"); return ""
+        except Exception:
+            print(f"{NEON_R}✗ Could not parse response.{R}\n"); return ""
+
+        print(f"\n{div}")
+        print(f"{NEON_C}{BOLD}  📜 Commits: {owner}/{repo}{R}")
+        print(div)
+        log_lines = []
+        for c in commits[:20]:
+            sha    = c.get("sha","")[:7]
+            msg    = c.get("commit",{}).get("message","").split("\n")[0][:60]
+            author = c.get("commit",{}).get("author",{}).get("name","?")[:15]
+            date   = c.get("commit",{}).get("author",{}).get("date","")[:10]
+            log_lines.append(f"{sha} {msg}")
+            print(f"  {NEON_Y}{sha}{R} {msg}  {DIM}{author} · {date}{R}")
+        print(f"{div}\n")
+        log_text = "\n".join(log_lines)
+    else:
+        limit = arg.strip() if arg.strip().isdigit() else "20"
+        r = subprocess.run(
+            ["git", "log", f"-{limit}", "--oneline", "--no-merges"],
+            capture_output=True, text=True, cwd=os.getcwd()
+        )
+        if r.returncode != 0:
+            print(f"\n{NEON_R}✗ Not inside a git repository.{R}")
+            print(f"{NEON_Y}  Tip: pass a GitHub URL:{R}")
+            print(f"  {NEON_C}/gitlog https://github.com/neo4-svg/cybersh{R}\n")
+            return ""
+        log_text = r.stdout.strip()
+        if not log_text:
+            print(f"\n{NEON_Y}No commits found.{R}\n"); return ""
+        print(f"\n{div}")
+        print(f"{NEON_C}{BOLD}  📜 Git Log (last {limit} commits){R}")
+        print(div)
+        print(f"{DIM}{log_text}{R}")
+        print(f"{div}\n")
+
+    return ask(cfg, messages, session_msgs,
+        f"Summarize these git commits in plain English:\n{log_text}\n\n"
+        f"Tell me: 1) What features were added. 2) What was fixed. "
+        f"3) Any concerning patterns. 4) Overall project health.")
+
+
+
+
+# ══════════════════════════════════════════════════════════════
+#  MORE FEATURES
+# ══════════════════════════════════════════════════════════════
+
+def cmd_ipinfo(arg: str) -> None:
+    """Show info about an IP address or your own public IP."""
+    target = arg.strip() if arg.strip() else ""
+    url    = f"https://ipinfo.io/{target}/json" if target else "https://ipinfo.io/json"
+    w   = min(cols(), 55)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+    print(f"\n{NEON_C}🌐 Looking up IP…{R}", end="", flush=True)
+    data = _http_get(url)
+    if not data:
+        print(f"\r{NEON_R}✗ Could not reach ipinfo.io{R}\n"); return
+    try:
+        info = json.loads(data)
+    except Exception:
+        print(f"\r{NEON_R}✗ Parse error{R}\n"); return
+
+    print(f"\r{div}")
+    label = f"IP Info: {info.get('ip','?')}"
+    if target: label += f" (lookup: {target})"
+    print(f"{NEON_C}{BOLD}  {label}{R}")
+    print(div)
+    fields = [
+        ("IP",       info.get("ip","")),
+        ("Hostname", info.get("hostname","")),
+        ("City",     info.get("city","")),
+        ("Region",   info.get("region","")),
+        ("Country",  info.get("country","")),
+        ("Location", info.get("loc","")),
+        ("ISP/Org",  info.get("org","")),
+        ("Timezone", info.get("timezone","")),
+    ]
+    for label, val in fields:
+        if val:
+            print(f"  {NEON_Y}{label:<12}{R} {val}")
+    print(f"{div}\n")
+
+
+def cmd_base(arg: str) -> None:
+    """Convert numbers between bases (binary, octal, hex, decimal)."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /base <number> [from_base]")
+        print(f"  Examples:")
+        print(f"    /base 255          → shows binary, octal, hex")
+        print(f"    /base 0xff         → hex to decimal etc")
+        print(f"    /base 11111111 2   → binary to others{R}\n")
+        return
+
+    parts = arg.strip().split()
+    num_str = parts[0].lower()
+    w   = min(cols(), 50)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    try:
+        if len(parts) > 1 and parts[1].isdigit():
+            n = int(num_str, int(parts[1]))
+        elif num_str.startswith("0x"):
+            n = int(num_str, 16)
+        elif num_str.startswith("0b"):
+            n = int(num_str, 2)
+        elif num_str.startswith("0o"):
+            n = int(num_str, 8)
+        else:
+            n = int(num_str)
+
+        print(f"\n{div}")
+        print(f"{NEON_C}{BOLD}  🔢 Base Converter: {num_str}{R}")
+        print(div)
+        print(f"  {NEON_Y}Decimal{R}  (base 10): {NEON_G}{n:,}{R}")
+        print(f"  {NEON_Y}Binary  {R} (base  2): {NEON_G}{bin(n)}{R}  {DIM}({len(bin(n))-2} bits){R}")
+        print(f"  {NEON_Y}Octal   {R} (base  8): {NEON_G}{oct(n)}{R}")
+        print(f"  {NEON_Y}Hex     {R} (base 16): {NEON_G}{hex(n).upper().replace("0X","0x")}{R}")
+        if 32 <= n <= 126:
+            print(f"  {NEON_Y}ASCII   {R}          : {NEON_G}{chr(n)}{R}")
+        print(f"{div}\n")
+    except ValueError:
+        print(f"{NEON_R}✗ Could not parse: {num_str}{R}\n")
+
+
+def cmd_clock(arg: str) -> None:
+    """Show current time in multiple timezones."""
+    import time as _time
+    w   = min(cols(), 55)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+    now = datetime.datetime.utcnow()
+
+    zones = {
+        "UTC":          0,
+        "Baghdad (IQ)": 3,
+        "London":       1 if _time.daylight else 0,
+        "New York":    -4 if _time.daylight else -5,
+        "Los Angeles": -7 if _time.daylight else -8,
+        "Tokyo":        9,
+        "Sydney":      10,
+        "Dubai":        4,
+    }
+
+    # if user gave a custom offset like /clock +5
+    if arg.strip():
+        m = re.match(r"([+-]?\d+)", arg.strip())
+        if m:
+            zones[f"UTC{'+' if int(m.group(1))>=0 else ''}{m.group(1)}"] = int(m.group(1))
+
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🕐 World Clock{R}")
+    print(div)
+    for name, offset in zones.items():
+        local = now + datetime.timedelta(hours=offset)
+        time_str = local.strftime("%H:%M:%S")
+        date_str = local.strftime("%a %d %b")
+        is_now   = "← you" if "Baghdad" in name or "IQ" in name else ""
+        color    = NEON_G if is_now else NEON_Y
+        print(f"  {color}{name:<18}{R} {NEON_C}{BOLD}{time_str}{R}  {DIM}{date_str}  {is_now}{R}")
+    print(f"{div}\n")
+
+
+def cmd_lorem(arg: str) -> None:
+    """Generate placeholder lorem ipsum text."""
+    try:
+        count = int(arg.strip()) if arg.strip().isdigit() else 1
+    except Exception:
+        count = 1
+
+    paras = [
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.",
+        "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim.",
+        "Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt.",
+        "At vero eos et accusamus et iusto odio dignissimos ducimus qui blanditiis praesentium voluptatum deleniti atque corrupti quos dolores et quas molestias excepturi sint occaecati cupiditate non provident.",
+    ]
+    w   = min(cols(), 70)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  📄 Lorem Ipsum ({count} paragraph{'s' if count>1 else ''}){R}")
+    print(div)
+    for i in range(min(count, len(paras))):
+        print(f"\n{paras[i]}")
+    print(f"\n{div}\n")
+
+
+def cmd_gist(arg: str) -> None:
+    """Fetch and display a GitHub Gist."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /gist <gist_url or gist_id>{R}\n"); return
+
+    gist_id = arg.strip().split("/")[-1].replace(".git","")
+    url     = f"https://api.github.com/gists/{gist_id}"
+    w   = min(cols(), 68)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    print(f"\n{NEON_C}Fetching gist…{R}", end="", flush=True)
+    data = _http_get(url)
+    if not data:
+        print(f"\r{NEON_R}✗ Could not fetch gist.{R}\n"); return
+    try:
+        gist = json.loads(data)
+    except Exception:
+        print(f"\r{NEON_R}✗ Parse error.{R}\n"); return
+
+    desc  = gist.get("description","(no description)")
+    owner = gist.get("owner",{}).get("login","?")
+    files = gist.get("files",{})
+
+    print(f"\r{div}")
+    print(f"{NEON_C}{BOLD}  📎 Gist: {desc[:50]}{R}")
+    print(f"  {DIM}by {owner} · {len(files)} file(s){R}")
+    print(div)
+
+    for fname, finfo in list(files.items())[:3]:
+        lang    = finfo.get("language","") or ""
+        size    = finfo.get("size",0)
+        content = finfo.get("content","") or ""
+        print(f"\n  {NEON_Y}📄 {fname}{R}  {DIM}{lang} · {size} bytes{R}")
+        print(f"{DIM}{content[:500]}{'…' if len(content)>500 else ''}{R}")
+
+    if len(files) > 3:
+        print(f"\n  {DIM}+ {len(files)-3} more files — view at: https://gist.github.com/{gist_id}{R}")
+    print(f"{div}\n")
+
+
+
+# ══════════════════════════════════════════════════════════════
+#  SECURITY TOOLS
+# ══════════════════════════════════════════════════════════════
+
+def cmd_hash(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Identify hash type and attempt to crack common ones."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /hash <hash_string>{R}\n"); return ""
+
+    import hashlib
+    h   = arg.strip()
+    w   = min(cols(), 65)
+    div = f"{NEON_C}{chr(9472)*w}{R}"
+
+    # identify by length and charset
+    hex_chars  = set("0123456789abcdefABCDEF")
+    b64_chars  = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    is_hex     = all(c in hex_chars for c in h)
+
+    type_map = {
+        32:  ["MD5", "NTLM"],
+        40:  ["SHA-1", "MySQL v4"],
+        56:  ["SHA-224"],
+        64:  ["SHA-256", "BLAKE2s"],
+        96:  ["SHA-384"],
+        128: ["SHA-512", "BLAKE2b"],
+        16:  ["MySQL v3 (half MD5)"],
+        60:  ["bcrypt (starts with $2)"] if h.startswith("$2") else ["?"],
+    }
+
+    identified = []
+    if is_hex and len(h) in type_map:
+        identified = type_map[len(h)]
+    elif h.startswith("$2"):
+        identified = ["bcrypt"]
+    elif h.startswith("$1$"):
+        identified = ["MD5-crypt"]
+    elif h.startswith("$6$"):
+        identified = ["SHA-512-crypt (Linux shadow)"]
+    elif h.startswith("$5$"):
+        identified = ["SHA-256-crypt"]
+
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  # Hash Analyzer{R}")
+    print(div)
+    print(f"  {NEON_Y}Hash   :{R} {DIM}{h[:60]}{'…' if len(h)>60 else ''}{R}")
+    print(f"  {NEON_Y}Length :{R} {len(h)} chars")
+    print(f"  {NEON_Y}Type   :{R} {NEON_G}{', '.join(identified) if identified else 'Unknown'}{R}")
+
+    # try cracking against common passwords
+    common = ["password","123456","admin","letmein","qwerty","welcome",
+              "password123","abc123","monkey","dragon","master","sunshine",
+              "princess","shadow","superman","michael","football","baseball"]
+    cracked = None
+    for word in common:
+        for algo, fn in [("md5", hashlib.md5), ("sha1", hashlib.sha1),
+                         ("sha256", hashlib.sha256), ("sha512", hashlib.sha512)]:
+            if fn(word.encode()).hexdigest() == h.lower():
+                cracked = word; break
+        if cracked: break
+
+    if cracked:
+        print(f"  {NEON_R}{BOLD}⚠ CRACKED: '{cracked}' (common password list){R}")
+    else:
+        print(f"  {NEON_G}✓ Not in common password list{R}")
+
+    print(f"{div}\n")
+
+    return ask(cfg, messages, session_msgs,
+        f"Analyze this hash for security research:\n"
+        f"Hash: {h}\nIdentified as: {', '.join(identified) if identified else 'unknown'}\n"
+        f"Cracked: {cracked or 'no'}\n\n"
+        f"Tell me: 1) How strong is this hash algorithm. "
+        f"2) Known attack methods. 3) Tools to crack it (hashcat, john). "
+        f"4) Recommended algorithm to use instead if weak.")
+
+
+def cmd_headers(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Check HTTP security headers of a website — with severity-tagged results."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /headers <url or domain>")
+        print(f"  Example: /headers example.com{R}\n"); return ""
+
+    url = arg.strip()
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    w   = min(cols(), 72)
+    div = f"{NEON_C}{'─'*w}{R}"
+    print(f"\n{div}")
+    print(f"{NEON_C}{BOLD}  🔒 Security Headers: {arg}{R}")
+    print(div)
+    print(f"  {DIM}Fetching headers…{R}", end="", flush=True)
+
+    r = subprocess.run(
+        ["curl", "-sI", "--max-time", "8", "-L", url],
+        capture_output=True, text=True
+    )
+    if r.returncode != 0 or not r.stdout:
+        print(f"\r  {NEON_R}✗ Could not reach {url}{R}\n")
+        return ""
+
+    headers = {}
+    for line in r.stdout.splitlines():
+        if ":" in line and not line.startswith("HTTP"):
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+
+    # (header_key, label, severity_if_missing)
+    # severity: "Critical" / "Warning" / "Info"
+    security_headers = [
+        ("strict-transport-security", "HSTS",              "Critical"),
+        ("content-security-policy",   "CSP",                "Critical"),
+        ("x-frame-options",           "Clickjacking Protect","Warning"),
+        ("x-content-type-options",    "MIME Sniffing Block", "Warning"),
+        ("referrer-policy",           "Referrer Policy",     "Info"),
+        ("permissions-policy",        "Permissions Policy",  "Info"),
+    ]
+    sev_color = {"Critical": NEON_R, "Warning": NEON_Y, "Info": NEON_C}
+
+    print(f"\r  {'Header':<24}{'Status':<14}{'Severity':<10}")
+    print(f"  {'─'*60}")
+    results = []  # for AI prompt — single source of truth, matches what's printed
+    for h_key, label, sev in security_headers:
+        present = h_key in headers
+        if present:
+            status_txt = f"{NEON_G}✓ Present{R}"
+            sev_txt    = f"{DIM}—{R}"
+        else:
+            status_txt = f"{NEON_R}✗ Missing{R}"
+            sev_txt    = f"{sev_color[sev]}{sev}{R}"
+        print(f"  {NEON_Y}{label:<24}{R}{status_txt:<23}{sev_txt}")
+        results.append({"label": label, "present": present, "severity": sev if not present else None})
+
+    # Server banner — informational only, never "critical"
+    server_val = headers.get("server", "")
+    server_hidden = (not server_val) or len(server_val) < 10
+    print(f"  {'─'*60}")
+    if server_hidden:
+        print(f"  {NEON_Y}{'Server Banner':<24}{R}{NEON_G}✓ Hidden{R}{'':<13}{DIM}Info — good practice{R}")
+    else:
+        print(f"  {NEON_Y}{'Server Banner':<24}{R}{NEON_Y}⚠ Exposed{R}{'':<12}{NEON_C}Info — not a real risk{R}")
+        print(f"    {DIM}Value: {server_val[:40]}{R}")
+    print(div + "\n")
+
+    raw_headers   = "\n".join(f"{k}: {v}" for k,v in headers.items())
+    missing_lines = []
+    for r in results:
+        if r["present"]:
+            missing_lines.append(f"- {r['label']}: present")
+        else:
+            missing_lines.append(f"- {r['label']}: MISSING (severity: {r['severity']})")
+    missing_table = "\n".join(missing_lines)
+
+    return ask(cfg, messages, session_msgs,
+        f"Security header scan for {url}. Use ONLY this exact data — do not invent "
+        f"additional headers or findings not listed here:\n\n"
+        f"{missing_table}\n"
+        f"Server banner: {'hidden' if server_hidden else f'exposed ({server_val[:30]})'} "
+        f"— this is INFORMATIONAL ONLY, never call it critical.\n\n"
+        f"Raw response headers:\n{raw_headers}\n\n"
+        f"Give: 1) Overall score out of 10 based strictly on the Critical/Warning/Info "
+        f"counts above. 2) List only the Critical and Warning missing headers with the "
+        f"exact header line to add (e.g. 'Content-Security-Policy: default-src self'). "
+        f"3) One line noting server banner is informational, not a real vulnerability. "
+        f"Do not list headers that are already present as problems.")
+
+
+def cmd_osint(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """OSINT checklist and tools for a username or target."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /osint <username or target>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Create a complete OSINT investigation checklist for: {arg}\n\n"
+        f"Cover:\n"
+        f"1. Username search — which platforms to check and exact URLs\n"
+        f"2. Email/domain investigation tools and techniques\n"
+        f"3. Social media footprint — what to look for\n"
+        f"4. Public records and data breach databases to check\n"
+        f"5. Metadata investigation (images, documents)\n"
+        f"6. Tools to use: Sherlock, Maltego, theHarvester, etc.\n"
+        f"7. What NOT to do (stay legal)\n"
+        f"Format as a step-by-step actionable checklist.")
+
+
+def cmd_wordlist(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Generate a targeted wordlist based on a theme or target."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /wordlist <theme or target info>")
+        print(f"  Examples:")
+        print(f"    /wordlist company named TechCorp founded 2010 in London")
+        print(f"    /wordlist person named John Smith born 1990 loves football{R}\n")
+        return ""
+    return ask(cfg, messages, session_msgs,
+        f"Generate a targeted wordlist for password auditing based on:\n{arg}\n\n"
+        f"Include:\n"
+        f"1. Name variations (first, last, initials, combinations)\n"
+        f"2. Years and dates (birth year, founding year, etc.)\n"
+        f"3. Common substitutions (a→@, e→3, i→1, o→0, s→$)\n"
+        f"4. Common suffixes (123, !, 2024, #1, etc.)\n"
+        f"5. Combined patterns\n"
+        f"Output as a plain list, one word per line, 50-100 entries.")
+
+
+# ══════════════════════════════════════════════════════════════
+#  AI TOOLS
+# ══════════════════════════════════════════════════════════════
+
+def cmd_think(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Make AI think step by step before answering."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /think <question>{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Think through this carefully before answering. "
+        f"Use this format:\n"
+        f"🧠 THINKING:\n[break down the problem step by step, consider different angles]\n\n"
+        f"✅ ANSWER:\n[your final clear answer]\n\n"
+        f"Question: {arg}")
+
+
+def cmd_debate(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI argues both sides of any topic."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /debate <topic>")
+        print(f"  Example: /debate AI will replace programmers{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Debate both sides of: {arg}\n\n"
+        f"Format:\n"
+        f"✅ FOR (strongest arguments in favor):\n"
+        f"[3-4 compelling points]\n\n"
+        f"❌ AGAINST (strongest arguments against):\n"
+        f"[3-4 compelling points]\n\n"
+        f"⚖️ VERDICT:\n"
+        f"[which side has stronger arguments and why — be honest]")
+
+
+def cmd_improve(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """AI rewrites any text to be clearer and more professional."""
+    text = arg
+    if not text:
+        print(f"{NEON_Y}Paste your text to improve (END to finish):{R}")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if line.strip() == "END": break
+                lines.append(line)
+            except EOFError: break
+        text = "\n".join(lines)
+    if not text: return ""
+    return ask(cfg, messages, session_msgs,
+        f"Improve this text — make it clearer, more professional, and more impactful. "
+        f"Keep the same meaning and tone but fix grammar, flow, and word choice.\n\n"
+        f"Original:\n{text}\n\n"
+        f"Show: 1) The improved version. 2) A bullet list of what you changed and why.")
+
+
+def cmd_eli5_topic(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
+    """Explain any complex topic like the person is 5 years old."""
+    if not arg:
+        print(f"{NEON_Y}Usage: /eli5 <topic>")
+        print(f"  Example: /eli5 how does encryption work{R}\n"); return ""
+    return ask(cfg, messages, session_msgs,
+        f"Explain this like I am literally 5 years old: {arg}\n\n"
+        f"Rules: no jargon, short sentences, use fun real-world analogies "
+        f"(toys, food, playground, etc.), make it memorable and fun. "
+        f"If there is a common misconception about this topic, clear it up simply.")
 
 def cmd_notes(action: str, arg: str) -> None:
     """Quick note-taking during sessions."""
@@ -1860,9 +3150,11 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
     last_response = ""
 
     def _build_sys() -> str:
-        """Build the full system prompt: persona + mode + memory."""
+        """Build the full system prompt: persona + mode + memory + environment."""
         m    = MODES.get(cfg.get("mode","chat"), MODES["chat"])
         base = m["system"]
+        # inject OS/environment awareness
+        base += f"\n\n{get_env_context()}"
         # inject memory
         ctx = memory_context(mem)
         if ctx:
@@ -1997,15 +3289,9 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
                     if r.stdout: print(f"{NEON_G}{r.stdout}{R}")
                     if r.stderr: print(f"{NEON_R}{r.stderr}{R}")
         elif cmd == "/copy":
-            if not last_response: print(f"{NEON_Y}⚠ Nothing.{R}\n")
+            if not last_response: print(f"{NEON_Y}⚠ Nothing to copy yet — ask something first.{R}\n")
             else:
-                for c in [["xclip","-selection","clipboard"],["xsel","--clipboard","--input"]]:
-                    try:
-                        p = subprocess.Popen(c, stdin=subprocess.PIPE)
-                        p.communicate(last_response.encode())
-                        print(f"{NEON_G}✓ Copied!{R}\n"); break
-                    except FileNotFoundError: continue
-                else: print(f"{NEON_Y}Install: sudo apt install xclip{R}\n")
+                copy_to_clipboard(last_response)
         elif cmd == "/recon":
             if not arg: print(f"{NEON_Y}Usage: /recon <target>{R}\n")
             else:
@@ -2072,6 +3358,47 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
                 cmd_notes(action, arg2)
         elif cmd == "/tip":
             show_tip()
+        elif cmd == "/session":
+            parts2 = arg.split(maxsplit=1)
+            s_action = parts2[0] if parts2 else "list"
+            s_arg    = parts2[1] if len(parts2) > 1 else ""
+            cmd_session(s_action, s_arg, messages, session_msgs, cfg)
+        # ── everyday tools ───────────────────────────────────
+        elif cmd == "/convert":
+            cmd_convert(arg)
+        elif cmd == "/qr":
+            cmd_qr(arg)
+        elif cmd == "/speedtest":
+            cmd_speedtest()
+        elif cmd == "/pwcheck":
+            last_response = cmd_pwcheck(arg, cfg, messages, session_msgs)
+        # ── developer tools ──────────────────────────────────
+        elif cmd == "/debug":
+            last_response = cmd_debug(arg, cfg, messages, session_msgs)
+        elif cmd == "/review":
+            last_response = cmd_review(arg, cfg, messages, session_msgs)
+        elif cmd == "/template":
+            last_response = cmd_template(arg, cfg, messages, session_msgs)
+        elif cmd == "/gitlog":
+            last_response = cmd_gitlog(arg, cfg, messages, session_msgs)
+        # ── security tools ───────────────────────────────────
+        elif cmd == "/hash":
+            last_response = cmd_hash(arg, cfg, messages, session_msgs)
+        elif cmd == "/headers":
+            last_response = cmd_headers(arg, cfg, messages, session_msgs)
+        elif cmd == "/osint":
+            last_response = cmd_osint(arg, cfg, messages, session_msgs)
+        elif cmd == "/wordlist":
+            last_response = cmd_wordlist(arg, cfg, messages, session_msgs)
+        # ── ai tools ─────────────────────────────────────────
+        elif cmd == "/think":
+            last_response = cmd_think(arg, cfg, messages, session_msgs)
+        elif cmd == "/debate":
+            last_response = cmd_debate(arg, cfg, messages, session_msgs)
+        elif cmd == "/improve":
+            last_response = cmd_improve(arg, cfg, messages, session_msgs)
+        elif cmd == "/eli5":
+            last_response = cmd_eli5_topic(arg, cfg, messages, session_msgs)
         elif cmd == "/explaincode":
             last_response = cmd_explain_code(arg, cfg, messages, session_msgs)
         elif cmd == "/roast":
@@ -2168,7 +3495,7 @@ def main() -> None:
 
     if args.prompt or piped:
         mode     = MODES.get(cfg.get("mode","chat"), MODES["chat"])
-        messages = [{"role":"system","content":mode["system"]}]
+        messages = [{"role":"system","content":mode["system"] + "\n\n" + get_env_context()}]
         sess     = []
         prefix   = ""
         if args.file:
@@ -2208,7 +3535,7 @@ def main() -> None:
 
     if args.prompt or piped:
         mode     = MODES.get(cfg.get("mode","chat"), MODES["chat"])
-        messages = [{"role":"system","content":mode["system"]}]
+        messages = [{"role":"system","content":mode["system"] + "\n\n" + get_env_context()}]
         sess     = []
         prefix   = ""
         if args.file:
