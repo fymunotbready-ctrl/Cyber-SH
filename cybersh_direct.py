@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# version: 1.2
+# version: 1.3
 """
  ██████╗██╗   ██╗██████╗ ███████╗██████╗     ███████╗██╗  ██╗
 ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗    ██╔════╝██║  ██║
@@ -258,7 +258,13 @@ def check_and_update(force: bool = False) -> None:
 
     print(f"\n{G}{B}  ✓ Updated to v{remote_ver} — restarting!{R2}\n")
     time.sleep(1)
-    os.execv(sys.executable, [sys.executable, this_file] + sys.argv[1:])
+    # Pass --no-update so the restarted process skips the update check
+    # and doesn't loop back into another update cycle.
+    # Also strip --update so a manual `--update` run doesn't loop either.
+    restart_args = [a for a in sys.argv[1:] if a != "--update"]
+    if "--no-update" not in restart_args:
+        restart_args = ["--no-update"] + restart_args
+    os.execv(sys.executable, [sys.executable, this_file] + restart_args)
 
 # ══════════════════════════════════════════════════════════════
 #  ANSI
@@ -3484,46 +3490,6 @@ def main() -> None:
         check_and_update(force=getattr(args, 'update', False))
     elif getattr(args, 'update', False):
         check_and_update(force=True); return
-
-    if not cfg.get("model_path") or not os.path.exists(cfg.get("model_path","")):
-        print(f"\n{NEON_Y}No model configured. Running setup…{R}\n")
-        setup_wizard(cfg)
-        if not cfg.get("model_path"): return
-
-    piped = ""
-    if not sys.stdin.isatty(): piped = sys.stdin.read().strip()
-
-    if args.prompt or piped:
-        mode     = MODES.get(cfg.get("mode","chat"), MODES["chat"])
-        messages = [{"role":"system","content":mode["system"] + "\n\n" + get_env_context()}]
-        sess     = []
-        prefix   = ""
-        if args.file:
-            try:
-                with open(os.path.expanduser(args.file),"r",errors="replace") as f:
-                    content = f.read(50000)
-                ext    = os.path.splitext(args.file)[1][1:] or ""
-                prefix = f"[FILE: {args.file}]\n```{ext}\n{content}\n```"
-            except Exception as e:
-                print(f"{NEON_R}✗ {e}{R}"); sys.exit(1)
-        prompt   = args.prompt or ""
-        if piped: prompt = f"{prompt}\n\nSTDIN:\n{piped}".strip()
-        response = ask(cfg, messages, sess, prompt, prefix=prefix)
-        if args.output and response:
-            with open(os.path.expanduser(args.output),"w") as f: f.write(response)
-            print(f"{NEON_G}✓ Saved → {args.output}{R}")
-        return
-
-    repl(cfg)
-
-    if args.model:   cfg["model_path"]  = args.model
-    if args.temp:    cfg["temperature"] = args.temp
-    if args.mode:    cfg["mode"]        = args.mode
-    if args.ctx:     cfg["context"]     = args.ctx
-    if args.threads: cfg["threads"]     = args.threads
-
-    if args.setup:
-        setup_wizard(cfg); return
 
     if not cfg.get("model_path") or not os.path.exists(cfg.get("model_path","")):
         print(f"\n{NEON_Y}No model configured. Running setup…{R}\n")
