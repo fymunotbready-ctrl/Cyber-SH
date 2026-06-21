@@ -350,8 +350,6 @@ ALL_COMMANDS = [
     "/debug","/review","/template","/gitlog",
     "/hash","/headers","/osint","/wordlist",
     "/think","/debate","/improve","/eli5",
-    "/uuid","/cheatsheet","/json","/base","/color","/slugify","/lorem",
-    "/countdown","/ip","/clock","/gist","/cron","/quiz","/name",
     "--update","--no-update",
 ]
 
@@ -1317,16 +1315,6 @@ def print_help() -> None:
             ("/qr <text>",               "Generate QR code in terminal"),
             ("/speedtest",               "Test your internet speed + latency"),
             ("/pwcheck <password>",      "AI rates your password strength"),
-            ("/uuid [n]",                "Generate UUID4s (or /uuid 5 <name>)"),
-            ("/json <text>",             "Validate + pretty-print JSON (/json minify)"),
-            ("/base <number>",           "Convert number across bin/oct/dec/hex"),
-            ("/color <hex|rgb>",         "Convert color + show swatch"),
-            ("/slugify <text>",          "Turn text into a URL slug"),
-            ("/lorem [n]",               "Generate lorem ipsum placeholder text"),
-            ("/countdown <date>",        "Days/hours remaining until a date"),
-            ("/ip [address]",            "IP geolocation lookup (yours or any IP)"),
-            ("/clock [+offset]",         "World clock across timezones"),
-            ("/gist <url|id>",           "Fetch + display a GitHub Gist"),
         ]),
         ("👨‍💻 DEVELOPER", [
             ("/debug",                   "Paste broken code, AI finds every bug"),
@@ -1345,10 +1333,6 @@ def print_help() -> None:
             ("/debate <topic>",          "AI argues both sides of any topic"),
             ("/improve",                 "AI rewrites your text to be cleaner"),
             ("/eli5 <topic>",            "Explain anything like you are 5"),
-            ("/cheatsheet <topic>",      "Quick-reference cheat sheet for any tool/topic"),
-            ("/cron <expr|english>",     "Explain a cron expr, or build one from English"),
-            ("/quiz <topic>",            "5-question multiple-choice quiz"),
-            ("/name <description>",      "Brainstorm names for a project/product"),
         ]),
         ("💾 SESSIONS", [
             ("/session save <name>",    "Save current chat with a name"),
@@ -2343,113 +2327,6 @@ def cmd_convert(arg: str) -> None:
     print(f"{div}\n")
 
 
-def cmd_json(arg: str) -> None:
-    """Validate and pretty-print JSON. /json minify <text> to compact it."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /json <text>  |  /json minify <text>{R}\n"); return
-    w   = min(cols(), 70)
-    div = f"{NEON_C}{'─'*w}{R}"
-    minify = False
-    if arg.lower().startswith("minify "):
-        minify = True
-        arg = arg[7:]
-    try:
-        obj = json.loads(arg)
-    except Exception as e:
-        print(f"\n{div}")
-        print(f"{NEON_R}✗ Invalid JSON: {e}{R}")
-        print(f"{div}\n")
-        return
-    out = json.dumps(obj, separators=(",", ":")) if minify else json.dumps(obj, indent=2)
-    print(f"\n{div}")
-    print(f"{NEON_C}{BOLD}  {'🗜  Minified' if minify else '📄 Pretty-printed'} JSON{R}")
-    print(div)
-    print(f"{NEON_G}{out}{R}")
-    print(f"{div}\n")
-
-def cmd_color(arg: str) -> None:
-    """Convert a color between HEX, RGB, and HSL — with a terminal swatch."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /color <hex|rgb>")
-        print(f"  Examples: /color #1e90ff  |  /color 30,144,255{R}\n"); return
-    w   = min(cols(), 50)
-    div = f"{NEON_C}{'─'*w}{R}"
-    raw = arg.strip().lstrip("#")
-    try:
-        if "," in raw:
-            r, g, b = [int(x.strip()) for x in raw.split(",")]
-        else:
-            if len(raw) == 3:
-                raw = "".join(c*2 for c in raw)
-            r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
-    except Exception:
-        print(f"{NEON_R}✗ Could not parse color.{R}\n"); return
-
-    hexv = f"#{r:02x}{g:02x}{b:02x}"
-    rn, gn, bn = r/255, g/255, b/255
-    mx, mn = max(rn,gn,bn), min(rn,gn,bn)
-    l = (mx+mn)/2
-    if mx == mn:
-        h = s = 0.0
-    else:
-        d = mx - mn
-        s = d/(2-mx-mn) if l > 0.5 else d/(mx+mn)
-        if mx == rn:   h = (gn-bn)/d + (6 if gn < bn else 0)
-        elif mx == gn: h = (bn-rn)/d + 2
-        else:          h = (rn-gn)/d + 4
-        h *= 60
-    swatch_bg = f"\033[48;2;{r};{g};{b}m"
-
-    print(f"\n{div}")
-    print(f"{NEON_C}{BOLD}  🎨 Color Converter{R}")
-    print(div)
-    print(f"  {swatch_bg}        {R}  {NEON_Y}swatch{R}")
-    print(f"  {NEON_Y}HEX:{R} {NEON_G}{hexv}{R}")
-    print(f"  {NEON_Y}RGB:{R} {NEON_G}rgb({r}, {g}, {b}){R}")
-    print(f"  {NEON_Y}HSL:{R} {NEON_G}hsl({h:.0f}, {s*100:.0f}%, {l*100:.0f}%){R}")
-    print(f"{div}\n")
-
-def cmd_slugify(arg: str) -> None:
-    """Turn text into a clean URL slug."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /slugify <text>{R}\n"); return
-    slug = arg.strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
-    w   = min(cols(), 60)
-    div = f"{NEON_C}{'─'*w}{R}"
-    print(f"\n{div}")
-    print(f"{NEON_C}{BOLD}  🔗 Slugify{R}")
-    print(div)
-    print(f"  {NEON_G}{slug}{R}")
-    print(f"{div}\n")
-
-def cmd_countdown(arg: str) -> None:
-    """Show days/hours remaining until a date. /countdown 2026-12-25"""
-    if not arg:
-        print(f"{NEON_Y}Usage: /countdown <YYYY-MM-DD> [HH:MM]{R}\n"); return
-    raw = arg.strip()
-    fmt = "%Y-%m-%d %H:%M" if " " in raw else "%Y-%m-%d"
-    try:
-        target = datetime.datetime.strptime(raw, fmt)
-    except ValueError:
-        print(f"{NEON_R}✗ Use format YYYY-MM-DD or YYYY-MM-DD HH:MM{R}\n"); return
-    now   = datetime.datetime.now()
-    delta = target - now
-    w   = min(cols(), 50)
-    div = f"{NEON_C}{'─'*w}{R}"
-    print(f"\n{div}")
-    print(f"{NEON_C}{BOLD}  ⏳ Countdown → {target.strftime('%Y-%m-%d %H:%M')}{R}")
-    print(div)
-    if delta.total_seconds() < 0:
-        print(f"  {NEON_Y}That date has already passed ({-delta.days} days ago).{R}")
-    else:
-        days, rem = divmod(int(delta.total_seconds()), 86400)
-        hours, rem = divmod(rem, 3600)
-        mins, _    = divmod(rem, 60)
-        print(f"  {NEON_G}{days}d {hours}h {mins}m{R} remaining")
-    print(f"{div}\n")
-
 def cmd_qr(arg: str) -> None:
     """Generate a QR code in the terminal as ASCII blocks."""
     if not arg:
@@ -2483,37 +2360,6 @@ def cmd_qr(arg: str) -> None:
         else:
             print(f"{NEON_Y}  Install qrencode for offline QR:{R}")
             print(f"  {NEON_C}sudo apt install qrencode{R}\n")
-
-
-def cmd_uuid(arg: str) -> None:
-    """Generate UUID4s (or namespace UUID5s) — pure stdlib, no network."""
-    import uuid as _uuid
-    w   = min(cols(), 60)
-    div = f"{NEON_C}{'─'*w}{R}"
-    arg = (arg or "").strip()
-
-    print(f"\n{div}")
-    print(f"{NEON_C}{BOLD}  🆔 UUID Generator{R}")
-    print(div)
-
-    parts = arg.split(maxsplit=1)
-    kind  = parts[0].lower() if parts else ""
-
-    if kind == "5" and len(parts) > 1:
-        name = parts[1]
-        val  = _uuid.uuid5(_uuid.NAMESPACE_DNS, name)
-        print(f"  {NEON_Y}v5 (dns:{name}){R} {NEON_G}{val}{R}")
-    else:
-        try:
-            count = int(arg) if arg.isdigit() else 1
-        except ValueError:
-            count = 1
-        count = max(1, min(count, 20))
-        for _ in range(count):
-            print(f"  {NEON_G}{_uuid.uuid4()}{R}")
-
-    print(f"\n  {DIM}Usage: /uuid [count]  |  /uuid 5 <name>  (deterministic v5){R}")
-    print(f"{div}\n")
 
 
 def cmd_speedtest() -> None:
@@ -3216,52 +3062,6 @@ def cmd_eli5_topic(arg: str, cfg: dict, messages: list, session_msgs: list) -> s
         f"(toys, food, playground, etc.), make it memorable and fun. "
         f"If there is a common misconception about this topic, clear it up simply.")
 
-def cmd_cron_explain(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
-    """AI explains (or builds) a cron schedule expression."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /cron <expression>  |  /cron every day at 5pm")
-        print(f"  Example: /cron 0 */4 * * *{R}\n"); return ""
-    return ask(cfg, messages, session_msgs,
-        f"This input is either a cron expression to explain, or a plain-English "
-        f"schedule to convert into a cron expression: \"{arg}\"\n\n"
-        f"If it looks like a cron expression, explain exactly when it runs in "
-        f"plain English. If it's plain English, give the correct cron expression "
-        f"and explain it. Keep it short and precise.")
-
-def cmd_quiz(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
-    """AI generates a short multiple-choice quiz on any topic."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /quiz <topic>")
-        print(f"  Example: /quiz networking basics{R}\n"); return ""
-    return ask(cfg, messages, session_msgs,
-        f"Create a 5-question multiple-choice quiz about: {arg}\n\n"
-        f"Format: numbered questions, each with 4 options (A-D). "
-        f"Put the answer key at the very end under a clearly marked 'Answers' "
-        f"section so it's easy to scroll past without spoiling.")
-
-def cmd_namebrainstorm(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
-    """AI brainstorms names for a project, product, or variable scheme."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /name <description>")
-        print(f"  Example: /name a CLI tool for managing dotfiles{R}\n"); return ""
-    return ask(cfg, messages, session_msgs,
-        f"Brainstorm 10 creative name ideas for: {arg}\n\n"
-        f"Format as a numbered list, each with the name in bold-ish caps and "
-        f"a 5-8 word reason it fits. Mix styles: a few literal, a few clever/punny, "
-        f"a few abstract/brandable. No explanations beyond the one line each.")
-
-def cmd_cheatsheet(arg: str, cfg: dict, messages: list, session_msgs: list) -> str:
-    """AI-generated quick-reference cheat sheet for any tool, language, or topic."""
-    if not arg:
-        print(f"{NEON_Y}Usage: /cheatsheet <tool or topic>")
-        print(f"  Example: /cheatsheet tmux{R}\n"); return ""
-    return ask(cfg, messages, session_msgs,
-        f"Write a concise terminal-friendly cheat sheet for: {arg}\n\n"
-        f"Format: short intro line, then grouped sections with the most useful "
-        f"commands/syntax/shortcuts as a list (`command` — what it does). "
-        f"Keep each entry to one line. Cover the 80% of use cases people actually need. "
-        f"No fluff, no long paragraphs.")
-
 def cmd_notes(action: str, arg: str) -> None:
     """Quick note-taking during sessions."""
     notes_file = os.path.expanduser("~/.cybersh_notes.json")
@@ -3687,26 +3487,6 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
                 cmd_speedtest()
             elif cmd == "/pwcheck":
                 last_response = cmd_pwcheck(arg, cfg, messages, session_msgs)
-            elif cmd == "/uuid":
-                cmd_uuid(arg)
-            elif cmd == "/json":
-                cmd_json(arg)
-            elif cmd == "/base":
-                cmd_base(arg)
-            elif cmd == "/color":
-                cmd_color(arg)
-            elif cmd == "/slugify":
-                cmd_slugify(arg)
-            elif cmd == "/lorem":
-                cmd_lorem(arg)
-            elif cmd == "/countdown":
-                cmd_countdown(arg)
-            elif cmd == "/ip":
-                cmd_ipinfo(arg)
-            elif cmd == "/clock":
-                cmd_clock(arg)
-            elif cmd == "/gist":
-                cmd_gist(arg)
             # ── developer tools ──────────────────────────────────
             elif cmd == "/debug":
                 last_response = cmd_debug(arg, cfg, messages, session_msgs)
@@ -3734,14 +3514,6 @@ def repl(cfg: dict, one_shot: str | None = None) -> None:
                 last_response = cmd_improve(arg, cfg, messages, session_msgs)
             elif cmd == "/eli5":
                 last_response = cmd_eli5_topic(arg, cfg, messages, session_msgs)
-            elif cmd == "/cheatsheet":
-                last_response = cmd_cheatsheet(arg, cfg, messages, session_msgs)
-            elif cmd == "/cron":
-                last_response = cmd_cron_explain(arg, cfg, messages, session_msgs)
-            elif cmd == "/quiz":
-                last_response = cmd_quiz(arg, cfg, messages, session_msgs)
-            elif cmd == "/name":
-                last_response = cmd_namebrainstorm(arg, cfg, messages, session_msgs)
             elif cmd == "/explaincode":
                 last_response = cmd_explain_code(arg, cfg, messages, session_msgs)
             elif cmd == "/roast":
