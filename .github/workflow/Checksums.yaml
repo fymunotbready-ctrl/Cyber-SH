@@ -1,0 +1,41 @@
+name: Update checksums.txt
+
+# Keeps checksums.txt in sync with cybersh_direct.py so the in-app
+# auto-updater (check_and_update() in cybersh_direct.py) can verify
+# downloaded code before installing it. See audit finding C2.
+#
+# NOTE: this is a stopgap, not real code-signing. It proves the file on
+# `main` hasn't been silently swapped between push and download — it does
+# NOT prove the push itself came from a trusted maintainer. For real
+# authenticity guarantees, move to signed GitHub Releases + a pinned
+# public key (see audit findings C2 / H4 for the longer-term plan).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cybersh_direct.py'
+
+permissions:
+  contents: write
+
+jobs:
+  update-checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Compute SHA-256 of cybersh_direct.py
+        run: |
+          sha256sum cybersh_direct.py > checksums.txt
+          cat checksums.txt
+
+      - name: Commit checksums.txt if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add checksums.txt
+          git diff --cached --quiet || git commit -m "chore: update checksums.txt [skip ci]"
+          git push
