@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import datetime
 import glob
@@ -29,10 +30,11 @@ import ssl
 import uuid as _uuid
 from typing import Any, Generator
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from groq import Groq
 
 # ─────────────────────────────────────────────
 #  APP
@@ -58,7 +60,7 @@ CONFIG_PATH  = os.path.expanduser("~/.cybersh_direct.json")
 MEMORY_PATH  = os.path.expanduser("~/.cybersh_memory.json")
 GOALS_PATH   = os.path.expanduser("~/.cybersh_goals.json")
 NOTES_PATH   = os.path.expanduser("~/.cybersh_notes.json")
-SESSIONS_DIR = os.path.expanduser("~/.cybersh_sessions")
+SESSIONS_DIR = os.path.abspath(os.path.expanduser("~/.cybersh_sessions"))
 
 DEFAULT_CFG: dict[str, Any] = {
     "model_path": "",
@@ -178,101 +180,46 @@ def save_cfg(cfg: dict) -> None:
 # ─────────────────────────────────────────────
 #  LLAMA-CPP WRAPPER
 # ─────────────────────────────────────────────
-_llm_instance = None
+# ─────────────────────────────────────────────
+#  GROQ CLIENT
+# ─────────────────────────────────────────────
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+_groq_client: Groq | None = None
 
+# Free Groq models — pick one (llama-3.3-70b-versatile is best quality)
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-def get_llm(cfg: dict):
-    global _llm_instance
-    if _llm_instance is not None:
-        return _llm_instance
-    try:
-        from llama_cpp import Llama
-    except ImportError:
-        raise HTTPException(500, "llama-cpp-python not installed. Run: pip install llama-cpp-python")
+GROQ_AVAILABLE_MODELS = {
+    "llama-3.3-70b-versatile": "Llama 3.3 70B — best quality (recommended)",
+    "llama-3.1-8b-instant":    "Llama 3.1 8B — fastest responses",
+    "mixtral-8x7b-32768":      "Mixtral 8x7B — great for code",
+    "gemma2-9b-it":            "Gemma 2 9B — Google model",
+}
 
-    model_path = cfg.get("model_path", "").strip()
-    if not model_path or not os.path.exists(model_path):
-        raise HTTPException(400, "No model loaded. Set model_path in config or run /api/config first.")
-
-    _llm_instance = Llama(
-        model_path=model_path,
-        n_ctx=cfg["context"],
-        n_threads=cfg.get("threads", 4),
-        n_gpu_layers=0,
-        verbose=False,
-    )
-    return _llm_instance
-
-
-def build_prompt(messages: list, model_path: str) -> str:
-    mp = model_path.lower()
-    parts = []
-    if "phi-3" in mp or "phi3" in mp:
-        for m in messages:
-            if m["role"] == "system":
-                parts.append(f"<|system|>\n{m['content']}<|end|>")
-            elif m["role"] == "user":
-                parts.append(f"<|user|>\n{m['content']}<|end|>")
-            elif m["role"] == "assistant":
-                parts.append(f"<|assistant|>\n{m['content']}<|end|>")
-        parts.append("<|assistant|>")
-    elif "mistral" in mp or "mixtral" in mp:
-        sys_content = next((m["content"] for m in messages if m["role"] == "system"), "")
-        conv = [m for m in messages if m["role"] != "system"]
-        for i, m in enumerate(conv):
-            if m["role"] == "user":
-                prefix = f"[INST] {sys_content}\n" if i == 0 and sys_content else "[INST] "
-                parts.append(f"{prefix}{m['content']} [/INST]")
-            elif m["role"] == "assistant":
-                parts.append(f"{m['content']}</s>")
-    elif "qwen" in mp:
-        sys_msg = next((m["content"] for m in messages if m["role"] == "system"), "You are a helpful assistant.")
-        parts.append("<|im_start|>system\n" + sys_msg + "<|im_end|>")
-        for m in messages:
-            if m["role"] == "system":
-                continue
-            parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>")
-        parts.append("<|im_start|>assistant")
-    else:
-        sys_msg = next((m["content"] for m in messages if m["role"] == "system"), "You are a helpful assistant.")
-        parts.append("<|system|>\n" + sys_msg)
-        for m in messages:
-            if m["role"] == "system":
-                continue
-            tag = "<|user|>" if m["role"] == "user" else "<|assistant|>"
-            parts.append(f"{tag}\n{m['content']}")
-        parts.append("<|assistant|>")
-    return "\n".join(parts)
+def get_groq_client() -> Groq:
+    global _groq_client
+    if _groq_client is not None:
+        return _groq_client
+    if not GROQ_API_KEY:
+        raise HTTPException(500, "GROQ_API_KEY environment variable not set. Get a free key at console.groq.com")
+    _groq_client = Groq(api_key=GROQ_API_KEY)
+    return _groq_client
 
 
 def stream_llm(cfg: dict, messages: list) -> Generator[str, None, None]:
-    llm = get_llm(cfg)
-    prompt = build_prompt(messages, cfg["model_path"])
-    stream = llm(
-        prompt,
+    client = get_groq_client()
+    model = cfg.get("groq_model", GROQ_MODEL)
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
         max_tokens=cfg.get("max_tokens", 2048),
         temperature=cfg.get("temperature", 0.7),
-        repeat_penalty=1.3,
-        frequency_penalty=0.3,
         stream=True,
-        stop=["<|user|>", "<|end|>", "[INST]", "<|im_start|>user"],
     )
-    full_text = ""
-    chunk_count = 0
-    for piece in stream:
-        token = piece["choices"].get("text", "")
-        if not token:
-            continue
-        full_text += token
-        chunk_count += 1
-        yield token
-        # repetition detection
-        if chunk_count % 40 == 0 and len(full_text) > 400:
-            recent = full_text[-400:]
-            tail, head = recent[-200:], recent[:-200]
-            if len(tail) >= 25 and tail[:25] in head:
-                yield "\n\n⚠ [stopped: repetition detected]"
-                return
+    for chunk in stream:
+        token = chunk.choices[0].delta.content
+        if token:
+            yield token
 
 
 def build_system_prompt(cfg: dict, mem: dict | None = None) -> str:
@@ -368,6 +315,78 @@ def http_get(url: str, timeout: int = 10) -> str | None:
             return r.read().decode("utf-8", errors="replace")
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────
+#  PATH SANITIZATION HELPER
+# ─────────────────────────────────────────────
+
+def get_safe_session_path(filename: str) -> str:
+    """
+    Prevents path traversal vulnerabilities by enforcing restrictions
+    on filenames and verifying resolving absolute paths.
+    """
+    # Enforce safe naming convention matching save format
+    if not re.match(r"^[a-zA-Z0-9_\-]+\.json$", filename):
+        raise HTTPException(400, "Invalid filename context format.")
+    
+    # Ensure standard directory path resolution containment
+    target_path = os.path.abspath(os.path.join(SESSIONS_DIR, filename))
+    if not target_path.startswith(SESSIONS_DIR + os.sep) and target_path != SESSIONS_DIR:
+        raise HTTPException(403, "Access Denied: Path Traversal Detected.")
+        
+    return target_path
+
+
+# ─────────────────────────────────────────────
+#  SAFE MATH EVAL HELPER
+# ─────────────────────────────────────────────
+
+def safe_math_eval(expr: str) -> float | int:
+    """
+    Parses math strings directly via AST trees without vulnerable eval evaluations.
+    """
+    allowed_operators = {
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: a / b,
+        ast.Mod: lambda a, b: a % b,
+        ast.Pow: lambda a, b: a ** b,
+        ast.USub: lambda a: -a,
+        ast.UAdd: lambda a: a
+    }
+
+    def _eval(node):
+        if isinstance(node, ast.Num):  # Legacy fallback support
+            return node.n
+        elif isinstance(node, ast.Constant): # Python 3.8+ Modern standard
+            if isinstance(node.value, (int, float)):
+                return node.value
+            raise TypeError("Invalid constant type")
+        elif isinstance(node, ast.BinOp):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            op_type = type(node.op)
+            if op_type in allowed_operators:
+                return allowed_operators[op_type](left, right)
+            raise ValueError(f"Unsupported operator: {op_type.__name__}")
+        elif isinstance(node, ast.UnaryOp):
+            operand = _eval(node.operand)
+            op_type = type(node.op)
+            if op_type in allowed_operators:
+                return allowed_operators[op_type](operand)
+            raise ValueError(f"Unsupported unary operator: {op_type.__name__}")
+        else:
+            raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+    try:
+        # Strip structural whitespace layout rules cleanly
+        clean_expr = expr.strip().replace(" ", "")
+        tree = ast.parse(clean_expr, mode='eval')
+        return _eval(tree.body)
+    except Exception:
+        raise ValueError("Failed to evaluate mathematical structure securely.")
 
 
 # ─────────────────────────────────────────────
@@ -467,20 +486,14 @@ class ConfigUpdateRequest(BaseModel):
 @app.get("/api/status")
 def status():
     cfg = load_cfg()
-    model_path = cfg.get("model_path", "")
-    model_loaded = os.path.exists(model_path) if model_path else False
-    model_name = os.path.basename(model_path).replace(".gguf", "") if model_path else None
-    model_size = None
-    if model_loaded:
-        try:
-            model_size = f"{os.path.getsize(model_path) / 1e9:.1f} GB"
-        except Exception:
-            pass
+    groq_ready = bool(GROQ_API_KEY)
+    current_model = cfg.get("groq_model", GROQ_MODEL)
     return {
         "version": "1.4",
-        "model_loaded": model_loaded,
-        "model_name": model_name,
-        "model_size": model_size,
+        "model_loaded": groq_ready,
+        "model_name": current_model,
+        "model_size": "cloud",
+        "backend": "groq",
         "mode": cfg.get("mode", "chat"),
         "temperature": cfg.get("temperature", 0.7),
         "context": cfg.get("context", 4096),
@@ -501,11 +514,6 @@ def get_personas():
     return {k: v[:100] + "…" for k, v in PERSONALITIES.items()}
 
 
-@app.get("/api/models")
-def get_models():
-    return KNOWN_MODELS
-
-
 @app.get("/api/tip")
 def get_tip():
     day_seed = datetime.datetime.now().strftime("%Y%m%d")
@@ -522,7 +530,7 @@ def get_config():
 def update_config(req: ConfigUpdateRequest):
     cfg = load_cfg()
     if req.model_path is not None:
-        cfg["model_path"] = req.model_path
+        cfg["groq_model"] = req.model_path  # repurpose model_path field for groq model name
     if req.temperature is not None:
         cfg["temperature"] = req.temperature
     if req.context is not None:
@@ -534,9 +542,12 @@ def update_config(req: ConfigUpdateRequest):
             raise HTTPException(400, f"Unknown mode: {req.mode}")
         cfg["mode"] = req.mode
     save_cfg(cfg)
-    global _llm_instance
-    _llm_instance = None  # force reload on next request
     return {"ok": True, "config": cfg}
+
+
+@app.get("/api/models")
+def get_models():
+    return GROQ_AVAILABLE_MODELS
 
 
 # ─────────────────────────────────────────────
@@ -566,10 +577,11 @@ def chat(req: ChatRequest):
                     yield f"data: {data}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield f"data: {json.dumps({'error': 'Streaming generated an unexpected internal issue.'})}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
     else:
+        # non-streaming: collect full response
         response = "".join(stream_llm(cfg, messages))
         return {"response": response, "mode": req.mode}
 
@@ -587,12 +599,14 @@ def tool_convert(req: ToolConvertRequest):
     label = ""
 
     conversions = {
+        # temperature
         ("c", "f"): (lambda v: v * 9/5 + 32, "°F"),
         ("celsius", "f"): (lambda v: v * 9/5 + 32, "°F"),
         ("f", "c"): (lambda v: (v - 32) * 5/9, "°C"),
         ("fahrenheit", "c"): (lambda v: (v - 32) * 5/9, "°C"),
         ("c", "k"): (lambda v: v + 273.15, "K"),
         ("k", "c"): (lambda v: v - 273.15, "°C"),
+        # distance
         ("km", "mi"): (lambda v: v * 0.621371, "miles"),
         ("km", "miles"): (lambda v: v * 0.621371, "miles"),
         ("mi", "km"): (lambda v: v * 1.60934, "km"),
@@ -601,23 +615,27 @@ def tool_convert(req: ToolConvertRequest):
         ("ft", "m"): (lambda v: v * 0.3048, "m"),
         ("cm", "in"): (lambda v: v * 0.393701, "in"),
         ("in", "cm"): (lambda v: v * 2.54, "cm"),
+        # weight
         ("kg", "lb"): (lambda v: v * 2.20462, "lbs"),
         ("kg", "lbs"): (lambda v: v * 2.20462, "lbs"),
         ("lb", "kg"): (lambda v: v * 0.453592, "kg"),
         ("lbs", "kg"): (lambda v: v * 0.453592, "kg"),
         ("g", "oz"): (lambda v: v * 0.035274, "oz"),
+        # data
         ("mb", "gb"): (lambda v: v / 1024, "GB"),
         ("gb", "mb"): (lambda v: v * 1024, "MB"),
         ("gb", "tb"): (lambda v: v / 1024, "TB"),
         ("tb", "gb"): (lambda v: v * 1024, "GB"),
         ("kb", "mb"): (lambda v: v / 1024, "MB"),
         ("mb", "kb"): (lambda v: v * 1024, "KB"),
+        # time
         ("hours", "minutes"): (lambda v: v * 60, "minutes"),
         ("h", "min"): (lambda v: v * 60, "minutes"),
         ("minutes", "hours"): (lambda v: v / 60, "hours"),
         ("hours", "seconds"): (lambda v: v * 3600, "seconds"),
         ("days", "hours"): (lambda v: v * 24, "hours"),
         ("weeks", "days"): (lambda v: v * 7, "days"),
+        # speed
         ("kmh", "mph"): (lambda v: v * 0.621371, "mph"),
         ("mph", "kmh"): (lambda v: v * 1.60934, "km/h"),
         ("m/s", "kmh"): (lambda v: v * 3.6, "km/h"),
@@ -688,6 +706,7 @@ def tool_hash(req: ToolHashRequest):
     elif is_hex and len(h) in type_map:
         identified = type_map[len(h)]
 
+    # attempt crack against common passwords
     common = [
         "password", "123456", "admin", "letmein", "qwerty", "welcome",
         "password123", "abc123", "monkey", "dragon", "master", "sunshine",
@@ -714,8 +733,11 @@ def tool_hash(req: ToolHashRequest):
 @app.post("/api/tools/uuid")
 def tool_uuid(req: ToolUUIDRequest):
     if req.namespace:
-        val = _uuid.uuid5(_uuid.NAMESPACE_DNS, req.namespace)
-        return {"uuids": [str(val)], "type": "v5", "namespace": req.namespace}
+        try:
+            val = _uuid.uuid5(_uuid.NAMESPACE_DNS, req.namespace)
+            return {"uuids": [str(val)], "type": "v5", "namespace": req.namespace}
+        except Exception:
+            raise HTTPException(400, "Failed to build namespace UUID structure.")
     count = max(1, min(req.count, 20))
     return {"uuids": [str(_uuid.uuid4()) for _ in range(count)], "type": "v4"}
 
@@ -724,8 +746,8 @@ def tool_uuid(req: ToolUUIDRequest):
 def tool_json(req: ToolJSONRequest):
     try:
         obj = json.loads(req.text)
-    except json.JSONDecodeError as e:
-        return {"valid": False, "error": str(e)}
+    except json.JSONDecodeError:
+        return {"valid": False, "error": "The string payload provided is not valid JSON."}
     if req.minify:
         out = json.dumps(obj, separators=(",", ":"))
     else:
@@ -748,7 +770,7 @@ def tool_base(req: ToolBaseRequest):
         else:
             n = int(num_str)
     except ValueError:
-        raise HTTPException(400, f"Could not parse: {num_str}")
+        raise HTTPException(400, "Could not parse formatting representation of number.")
 
     return {
         "decimal": n,
@@ -771,8 +793,9 @@ def tool_color(req: ToolColorRequest):
                 raw = "".join(c * 2 for c in raw)
             r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
     except Exception:
-        raise HTTPException(400, "Could not parse color. Use #hex or r,g,b")
+        raise HTTPException(400, "Could not parse color structure. Use #hex or r,g,b formats.")
 
+    # HSL conversion
     rn, gn, bn = r / 255, g / 255, b / 255
     mx, mn_ = max(rn, gn, bn), min(rn, gn, bn)
     l = (mx + mn_) / 2
@@ -801,17 +824,19 @@ def tool_color(req: ToolColorRequest):
 @app.post("/api/tools/calc")
 def tool_calc(req: ToolCalcRequest):
     expr = req.expression.strip()
+    # handle percentage
     pct = re.match(r"([\d.]+)%\s*of\s*([\d.]+)", expr.lower())
     if pct:
         a, b = float(pct.group(1)), float(pct.group(2))
         result = a / 100 * b
         return {"expression": expr, "result": result}
-    safe = re.sub(r"[^0-9+\-*/().% eE]", "", expr)
+        
+    # Safe Math Processing using AST trees instead of vulnerable eval strings
     try:
-        result = eval(safe, {"__builtins__": {}})
+        result = safe_math_eval(expr)
         return {"expression": expr, "result": result}
-    except Exception as e:
-        raise HTTPException(400, f"Math error: {e}")
+    except Exception:
+        raise HTTPException(400, "Math engine error: The expression structure is invalid or unapproved.")
 
 
 @app.post("/api/tools/pwcheck")
@@ -922,46 +947,37 @@ def tool_clock():
 def tool_slugify(text: str = Query(...)):
     slug = text.strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
+    # Fixed ReDoS: Split and join elements to completely remove continuous hyphens without regex engine loops
+    slug = "-".join([parts for parts in slug.split("-") if parts])
     return {"input": text, "slug": slug}
 
 
 @app.get("/api/tools/ipinfo")
 def tool_ipinfo(ip: str = ""):
-    # Strict regex validation to eliminate SSRF or arbitrary endpoint tracking warnings
-    if ip and not re.match(r"^[0-9a-fA-F.:]*$", ip):
-        raise HTTPException(400, "Invalid characters in IP parameter")
-        
     url = f"https://ipinfo.io/{ip}/json" if ip else "https://ipinfo.io/json"
     data = http_get(url)
     if not data:
-        raise HTTPException(503, "Could not reach ipinfo.io")
+        raise HTTPException(503, "Could not reach network metadata provider service.")
     try:
         return json.loads(data)
     except Exception:
-        raise HTTPException(500, "Failed to parse response")
+        raise HTTPException(500, "Failed to analyze targeted responses.")
 
 
 @app.get("/api/tools/headers")
 def tool_headers(url: str = Query(...)):
     if not url.startswith("http"):
         url = "https://" + url
-        
-    # Prevent command/argument injection tracking on dynamic query parameters
-    parsed_url = urllib.parse.urlparse(url)
-    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc or url.startswith("-"):
-        raise HTTPException(400, "Malformed or unsafe URL format provided")
-
     try:
         r = subprocess.run(
-            ["curl", "-sI", "--max-time", "8", "-L", "--", url],
+            ["curl", "-sI", "--max-time", "8", "-L", url],
             capture_output=True, text=True, timeout=12,
         )
-    except Exception as e:
-        raise HTTPException(503, f"curl failed: {e}")
+    except Exception:
+        raise HTTPException(503, "Internal subsystem execution error.")
 
     if not r.stdout:
-        raise HTTPException(503, f"Could not reach {url}")
+        raise HTTPException(503, "Failed to reach remote URL header context.")
 
     headers = {}
     for line in r.stdout.splitlines():
@@ -1011,7 +1027,7 @@ def tool_web_search(q: str = Query(...)):
     try:
         from ddgs import DDGS
     except ImportError:
-        raise HTTPException(500, "ddgs not installed. Run: pip install ddgs")
+        raise HTTPException(500, "ddgs search client dependency missing.")
     try:
         results = []
         with DDGS() as ddgs:
@@ -1022,8 +1038,8 @@ def tool_web_search(q: str = Query(...)):
                     "body": r.get("body", ""),
                 })
         return {"query": q, "results": results}
-    except Exception as e:
-        raise HTTPException(503, f"Search error: {e}")
+    except Exception:
+        raise HTTPException(503, "Engine failed to acquire indices from search query.")
 
 
 # ─────────────────────────────────────────────
@@ -1116,7 +1132,7 @@ def add_goal(req: GoalAddRequest):
 def complete_goal(index: int):
     goals = load_goals()
     if index < 1 or index > len(goals):
-        raise HTTPException(404, f"Goal #{index} not found")
+        raise HTTPException(404, "Target goal index context not found.")
     goals[index - 1]["done"] = True
     save_goals(goals)
     return {"ok": True, "goals": goals}
@@ -1150,7 +1166,7 @@ def add_note(req: NoteAddRequest):
 def delete_note(index: int):
     notes = load_notes()
     if index < 1 or index > len(notes):
-        raise HTTPException(404, f"Note #{index} not found")
+        raise HTTPException(404, "Target note context index out of bounds.")
     removed = notes.pop(index - 1)
     save_notes(notes)
     return {"ok": True, "removed": removed}
@@ -1163,7 +1179,7 @@ def clear_notes():
 
 
 # ─────────────────────────────────────────────
-#  ROUTES — SESSIONS (CodeQL Solid Shielded Version)
+#  ROUTES — SESSIONS
 # ─────────────────────────────────────────────
 
 def _ensure_sessions_dir():
@@ -1175,17 +1191,9 @@ def list_sessions():
     _ensure_sessions_dir()
     files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
     sessions = []
-    base_dir = os.path.abspath(SESSIONS_DIR)
-    
     for i, fpath in enumerate(files[:50], 1):
         try:
-            # CodeQL dataflow validation barrier for local discovery reads
-            clean_filename = os.path.basename(fpath)
-            target_path = os.path.abspath(os.path.join(base_dir, clean_filename))
-            if not target_path.startswith(base_dir + os.sep):
-                continue
-                
-            with open(target_path, encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 d = json.load(f)
             sessions.append({
                 "index": i,
@@ -1193,7 +1201,7 @@ def list_sessions():
                 "saved_at": d.get("saved_at", "?"),
                 "mode": d.get("mode", "chat"),
                 "turns": d.get("turns", 0),
-                "filename": clean_filename,
+                "filename": os.path.basename(fpath),
             })
         except Exception:
             pass
@@ -1205,20 +1213,14 @@ def save_session(req: SessionSaveRequest):
     _ensure_sessions_dir()
     convo = [m.dict() for m in req.messages if m.role in ("user", "assistant")]
     if not convo:
-        raise HTTPException(400, "No messages to save")
-        
-    # Rigorous validation to lock input tracking context inside safe boundaries
+        raise HTTPException(400, "No valid conversational sequences to preserve.")
     safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", req.name)
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
     filename = f"{safe_name}__{ts}.json"
     
-    clean_filename = os.path.basename(filename)
-    base_dir = os.path.abspath(SESSIONS_DIR)
-    target_path = os.path.abspath(os.path.join(base_dir, clean_filename))
+    # Enforce path containment mitigation rules on validation strings
+    path = get_safe_session_path(filename)
     
-    if not target_path.startswith(base_dir + os.sep):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sandbox traversal violation")
-        
     data = {
         "name": req.name,
         "saved_at": ts,
@@ -1226,7 +1228,7 @@ def save_session(req: SessionSaveRequest):
         "messages": convo,
         "turns": sum(1 for m in convo if m["role"] == "user"),
     }
-    with open(target_path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     return {"ok": True, "filename": filename, "turns": data["turns"]}
 
@@ -1234,47 +1236,29 @@ def save_session(req: SessionSaveRequest):
 @app.get("/api/sessions/{filename}")
 def load_session(filename: str):
     _ensure_sessions_dir()
-    
-    # 1. Anchor-validated strict match acting as an absolute boolean validation boundary
-    if not re.match(r"^[a-zA-Z0-9_\-]+\.json$", filename):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid session filename format")
-        
-    # 2. Strict component truncation and containment validation
-    clean_filename = os.path.basename(filename)
-    base_dir = os.path.abspath(SESSIONS_DIR)
-    target_path = os.path.abspath(os.path.join(base_dir, clean_filename))
-    
-    if not target_path.startswith(base_dir + os.sep):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sandbox traversal violation")
-        
-    if not os.path.exists(target_path):
-        raise HTTPException(404, "Session not found")
-        
-    with open(target_path, encoding="utf-8") as f:
-        return json.load(f)
+    # Mitigate Path Traversal via central path isolation sanitization functions
+    path = get_safe_session_path(filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The requested session file was not found.")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        raise HTTPException(500, "Could not open or parse target log stream metadata cleanly.")
 
 
 @app.delete("/api/sessions/{filename}")
 def delete_session(filename: str):
     _ensure_sessions_dir()
-    
-    # 1. Anchor-validated strict match acting as an absolute boolean validation boundary
-    if not re.match(r"^[a-zA-Z0-9_\-]+\.json$", filename):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid session filename format")
-        
-    # 2. Strict component truncation and containment validation
-    clean_filename = os.path.basename(filename)
-    base_dir = os.path.abspath(SESSIONS_DIR)
-    target_path = os.path.abspath(os.path.join(base_dir, clean_filename))
-    
-    if not target_path.startswith(base_dir + os.sep):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sandbox traversal violation")
-        
-    if not os.path.exists(target_path):
-        raise HTTPException(404, "Session not found")
-        
-    os.remove(target_path)
-    return {"ok": True, "deleted": filename}
+    # Mitigate Path Traversal via central path isolation sanitization functions
+    path = get_safe_session_path(filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "The session specified for removal does not exist.")
+    try:
+        os.remove(path)
+        return {"ok": True, "deleted": filename}
+    except Exception:
+        raise HTTPException(500, "Subsystem failed to drop target path resource constraints.")
 
 
 @app.get("/api/sessions/search/{keyword}")
@@ -1282,16 +1266,13 @@ def search_sessions(keyword: str):
     _ensure_sessions_dir()
     files = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.json")), reverse=True)
     found = []
-    base_dir = os.path.abspath(SESSIONS_DIR)
-    
     for fpath in files:
         try:
-            clean_filename = os.path.basename(fpath)
-            target_path = os.path.abspath(os.path.join(base_dir, clean_filename))
-            if not target_path.startswith(base_dir + os.sep):
-                continue
-                
-            with open(target_path, encoding="utf-8") as f:
+            # Safely verify containment matching baseline rules before opening path reference structures
+            basename = os.path.basename(fpath)
+            get_safe_session_path(basename)
+            
+            with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
             hits = []
             for msg in data.get("messages", []):
@@ -1306,7 +1287,7 @@ def search_sessions(keyword: str):
                 found.append({
                     "name": data.get("name", "?"),
                     "saved_at": data.get("saved_at", "?"),
-                    "filename": clean_filename,
+                    "filename": basename,
                     "hits": hits[:3],
                     "total_hits": len(hits),
                 })
@@ -1349,4 +1330,4 @@ def root():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("cybersh_api:app", host="0.0.0.0", port=8000, reload=True)
