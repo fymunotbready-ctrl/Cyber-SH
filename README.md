@@ -12,12 +12,41 @@
 **CYBER SH — Your Personal Offline AI Assistant**  
 Runs entirely on your own computer. No cloud. No subscriptions. No one watching.
 
-![Version](https://img.shields.io/badge/version-1.3-brightgreen)
+![Version](https://img.shields.io/badge/version-1.4-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20WSL-lightgrey)
+![Security](https://img.shields.io/badge/security-audited%20v1.4-blue)
 
 </div>
+
+---
+
+## 🔒 v1.4 — Security Update
+
+**v1.4 is a dedicated security release. No new features — just fixes to things that should have been right from the start. If you are on any earlier version, update immediately.**
+
+### What was fixed
+
+**1. TLS certificate verification (Critical)**  
+Previous versions disabled SSL certificate checking in the auto-updater, meaning a network attacker on the same Wi-Fi, a rogue DNS server, or a MITM proxy could have served arbitrary code that the tool would download and execute as an update. This is now fixed — TLS certificates are fully verified on every connection.
+
+**2. Auto-updater checksum verification (Critical)**  
+Even with valid TLS, a compromised GitHub account or CDN cache could serve a bad update. v1.4 adds SHA-256 checksum verification: the downloaded update is checked against a published `checksums.txt` manifest before it is ever written to disk. If the checksum does not match, the update is aborted and the file is deleted. If no manifest is available, you are asked to confirm before anything is installed.
+
+**3. Atomic update writes (Important)**  
+Previously, if your machine lost power or crashed mid-update, the script file could be left half-written and permanently broken. v1.4 writes updates to a temporary file first, syncs it to disk, then replaces the old file in a single atomic operation — so a crash at any point leaves you with either the old version or the new one, never a corrupted file.
+
+**4. Memory storage disclaimer (Important)**  
+The `/remember` command help text previously said "AI remembers this forever", which implied some form of secure storage. Memories are stored as plain-text JSON at `~/.cybersh_memory.json` — no encryption, no protection. v1.4 makes this explicit in the help text and prints a visible warning every time you use `/remember`. **Do not store passwords, API keys, or sensitive data using `/remember`.**
+
+**5. Obfuscated code removed (Trust)**  
+A section of `session_save` used `chr(109)+chr(101)+...` to spell out dictionary key names — the kind of pattern that triggers red flags in automated security scanners and makes the code look like it is hiding something. It was not malicious, but it was unnecessary and hurt trust. All obfuscated strings are now plain text.
+
+**6. Downloaded model SHA-256 verification (Important)**  
+Models downloaded via `/models` or `--setup` are now verified against a SHA-256 checksum after download. A corrupted download or a tampered file will be detected and deleted automatically. Checksums will be published and kept up to date in the repo as model providers publish them.
+
+> **How to get v1.4:** Just run the tool — the auto-updater handles it. Or pull the repo manually: `git pull && python3 cybersh_direct.py`
 
 ---
 
@@ -30,7 +59,6 @@ Runs entirely on your own computer. No cloud. No subscriptions. No one watching.
 | AI chat, all modes | ❌ No |
 | Memory, personas, goals, sessions | ❌ No |
 | Code help, file analysis | ❌ No |
-| Security tools (hash, headers needs internet, payloads offline) | Mixed — see below |
 | `/web` — web search | ✅ Yes |
 | `/weather` — weather | ✅ Yes |
 | `/summarize` — read a URL | ✅ Yes |
@@ -49,7 +77,7 @@ Runs entirely on your own computer. No cloud. No subscriptions. No one watching.
 CYBER SH **updates itself automatically every time you run it.**
 
 - On startup it silently checks GitHub for a newer version
-- If there is one, it downloads the new code, backs up your old file, installs any new packages, and restarts — all in seconds
+- If there is one, it downloads the new code, **verifies the SHA-256 checksum**, backs up your old file, installs any new packages, and restarts — all in seconds
 - If you are offline, it simply skips the check and continues normally
 - **You never need to run any update command manually — ever**
 
@@ -102,8 +130,6 @@ git clone https://github.com/neo4-svg/cybersh.git
 cd cybersh
 ```
 
-> This downloads everything to your computer. No extra downloads needed after this.
-
 ---
 
 ### Step 2 — Run setup
@@ -117,6 +143,7 @@ python3 cybersh_direct.py --setup
 - Installs the AI engine (`llama-cpp-python`)
 - Installs web search support (`ddgs`)
 - Lets you pick and download an AI model
+- Verifies the downloaded model with SHA-256 (new in v1.4)
 - Saves your configuration
 
 > ✅ You do not need to install anything separately. Setup handles everything.
@@ -129,11 +156,7 @@ python3 cybersh_direct.py --setup
 python3 cybersh_direct.py
 ```
 
-**That is it.** Every time you want to use CYBER SH, just run this one command from the `cybersh` folder. It will:
-- Check for updates automatically
-- Detect your GPU automatically
-- Load your AI model
-- Remember everything from your last session
+**That is it.** Every time you want to use CYBER SH, just run this one command from the `cybersh` folder.
 
 ---
 
@@ -189,7 +212,7 @@ wsl --install
 [5] 💬 Chat   — General assistant, ask it anything
 ```
 
-Switch modes any time by typing `/agent`, `/sec`, `/vibe`, `/code`, or `/chat`. Every mode is tuned to give answers useful to both beginners and professionals at once.
+Switch modes any time by typing `/agent`, `/sec`, `/vibe`, `/code`, or `/chat`.
 
 ---
 
@@ -203,6 +226,8 @@ Switch modes any time by typing `/agent`, `/sec`, `/vibe`, `/code`, or `/chat`. 
 /memories          → show everything the AI knows about you
 /forget python     → remove something from memory
 ```
+
+> ⚠️ **v1.4 note:** Memories are stored as plain-text JSON at `~/.cybersh_memory.json`. They are not encrypted. Do not store passwords, API keys, or anything sensitive here.
 
 ---
 
@@ -236,38 +261,15 @@ Switch modes any time by typing `/agent`, `/sec`, `/vibe`, `/code`, or `/chat`. 
 
 ### 🌐 Internet features
 
-These use your internet connection directly — no middleman server:
-
 ```
 /web latest AI news 2026
-→ searches DuckDuckGo and AI summarizes the results
-
-/weather Washington D.C
-→ shows ASCII weather forecast for Washington D.C
-
 /weather Baghdad
-→ shows weather for Baghdad
-
 /summarize https://example.com/article
-→ fetches the page and gives you a bullet point summary
-
 /cvesearch CVE-2024-1234
-→ searches for vulnerability info and gives full security analysis
-
 /headers example.com
-→ checks HTTP security headers with Critical/Warning/Info severity tags
-
-/ipinfo
-→ shows your public IP, location, and ISP
-
 /ipinfo 8.8.8.8
-→ looks up info on any IP address
-
 /gitlog https://github.com/neo4-svg/cybersh
-→ fetches recent commits from any GitHub repo and summarizes them
-
 /gist <gist url or id>
-→ fetches and displays a GitHub Gist
 ```
 
 ---
@@ -275,32 +277,14 @@ These use your internet connection directly — no middleman server:
 ### 🔐 Security tools
 
 ```
-/recon example.com
-→ full bug bounty recon plan: subdomains, ports, tech stack, fuzzing
-
-/payload xss
-→ ready-to-use XSS payloads: basic, encoded, polyglots, filter bypasses
-
-/cvesearch CVE-2024-1234
-→ severity, affected versions, exploit method, mitigation steps
-
-/explain "nmap -sV -T4 192.168.1.1"
-→ explains every flag and what the command does
-
-/ctf aGVsbG8gd29ybGQ=
-→ analyzes CTF challenge data, identifies encodings, guides you to solve it
-
-/hash 5f4dcc3b5aa765d61d8327deb882cf99
-→ identifies hash type (MD5/SHA/bcrypt) and checks against common passwords
-
-/osint username123
-→ full OSINT checklist — platforms, tools, and legal techniques
-
-/wordlist company named TechCorp founded 2010 in London
-→ targeted, deduplicated password wordlist with realistic variation
-
-/pwcheck MyPassword123!
-→ real entropy-based strength check plus AI analysis
+/recon example.com        → full bug bounty recon plan
+/payload xss              → ready-to-use payloads
+/explain "nmap -sV ..."   → explains every flag
+/ctf aGVsbG8gd29ybGQ=    → CTF challenge analyzer
+/hash 5f4dcc3b5aa765d6... → identifies hash type, checks common passwords
+/osint username123        → full OSINT checklist
+/wordlist TechCorp 2010   → targeted password wordlist
+/pwcheck MyPassword123!   → entropy-based strength check
 ```
 
 ---
@@ -308,47 +292,20 @@ These use your internet connection directly — no middleman server:
 ### ⚡ Developer tools
 
 ```
-/debug
-→ paste broken code, AI finds every bug with line numbers and explains why
-
-/review
-→ full code review: bugs, security, performance, readability, score out of 10
-
-/template fastapi
-→ generates a complete production-ready project with file structure
-
-/gitlog
-→ summarizes your local repo's recent commits (run inside a git folder)
-
-/explaincode
-→ paste any code, AI explains every single line in plain English
-
-/roast
-→ AI finds every bad practice in your code with humor, then gives the fixed version
-
-/fix ModuleNotFoundError: No module named 'requests'
-→ paste any error message, get the exact fix
-
-/howto zip a folder
-→ get the exact command for your OS — auto-detects your distro
-
-/tldr chmod 755
-→ plain English explanation of any command
-
-/regex match all email addresses
-→ AI writes the regex pattern with examples and test cases
-
-/git undo last commit without losing changes
-→ exact git commands for anything you want to do, explained for beginners too
-
-/diff
-→ paste a git diff, AI tells you what changed and any risks
-
-/rename user_data_processing_function
-→ AI suggests 5 better names with reasons
-
-/challenge hard
-→ get a coding or hacking challenge to practice
+/debug        → paste broken code, AI finds every bug
+/review       → full code review with score out of 10
+/template fastapi → complete production-ready project
+/gitlog       → summarizes recent commits
+/explaincode  → explains every line in plain English
+/roast        → finds bad practices with humor, then fixes them
+/fix <error>  → paste any error, get the exact fix
+/howto zip a folder → exact command for your OS
+/tldr chmod 755 → plain English explanation
+/regex match emails → AI writes the pattern with examples
+/git undo last commit → exact git commands, explained
+/diff         → paste a git diff, AI explains the changes
+/rename <name> → 5 better name suggestions with reasons
+/challenge hard → coding or hacking challenge to practice
 ```
 
 ---
@@ -356,17 +313,10 @@ These use your internet connection directly — no middleman server:
 ### 🤖 AI thinking tools
 
 ```
-/think how does TLS handshake work
-→ AI shows its reasoning step by step before giving the final answer
-
-/debate AI will replace programmers
-→ AI argues both sides fairly, then gives an honest verdict
-
-/improve
-→ paste any text, AI rewrites it clearer and explains every change
-
-/eli5 how does encryption work
-→ explains any topic using simple analogies, zero jargon
+/think how does TLS handshake work  → step-by-step reasoning before answering
+/debate AI will replace programmers → both sides argued fairly, honest verdict
+/improve                            → paste text, AI rewrites it cleaner
+/eli5 how does encryption work      → zero jargon, simple analogies
 ```
 
 ---
@@ -375,58 +325,23 @@ These use your internet connection directly — no middleman server:
 
 ```
 /convert 100 km to miles
-→ converts distance, temperature, weight, data size, time, speed
-
 /qr https://github.com/neo4-svg/cybersh
-→ generates a scannable QR code right in your terminal
-
 /speedtest
-→ tests your internet download speed and latency
-
 /calc 15% of 240
-→ quick math (/calc 2**32 also works)
-
 /encode hello world
-→ shows Base64 + Hex + URL + MD5 + SHA1 + SHA256, auto-detects input type
-
 /encode decode aGVsbG8gd29ybGQ=
-→ auto-detects encoding type and decodes it properly
-
 /base 255
-→ converts a number between decimal, binary, octal, and hex
-
 /clock
-→ shows current time across major timezones
-
 /translate arabic How are you today
-→ instant clean translation, no repetition or looping
-
 /passgen
-→ generate 3 strong passwords (16, 24, 32 chars)
-
 /passgen phrase
-→ generate passphrases like: ghost-vault-cipher-7291
-
 /timer 25m
-→ countdown timer with live progress bar
-
 /goals
-→ daily goal tracker with progress bar
-
 /note remember to test the API endpoint
-→ save a quick note, persists between sessions
-
 /benchmark
-→ tests CPU, RAM, disk speed — gives a score and grade (S/A/B/C/D)
-
 /syswatch
-→ live CPU / RAM / disk monitor, updates every second
-
 /recap
-→ summary of everything you asked this session
-
 /tip
-→ a useful Linux tip, changes every day
 ```
 
 ---
@@ -434,17 +349,10 @@ These use your internet connection directly — no middleman server:
 ### 📁 File tools
 
 ```
-/f ~/myproject/app.py
-→ loads a file so the AI can read and help with it
-
-/o ~/output/fixed_script.py
-→ saves the last AI response to a file
-
-/run
-→ runs the last code block the AI wrote (asks your confirmation first)
-
-/copy
-→ copies the last AI response to your clipboard — auto-detects Wayland, X11, macOS, or WSL
+/f ~/myproject/app.py   → load a file into AI context
+/o ~/output/result.py   → save last AI response to a file
+/run                    → run the last code block (asks confirmation first)
+/copy                   → copy last response to clipboard
 ```
 
 ---
@@ -453,8 +361,9 @@ These use your internet connection directly — no middleman server:
 
 | Version | What was added |
 |---------|---------------|
-| **v1.3** | OS-aware AI responses (no more wrong package manager suggestions) · loop/repetition auto-detection · realistic entropy-based password checks · fixed clipboard auto-detection (Wayland/X11/macOS/WSL) · rewritten `/headers` with Critical/Warning/Info severity tags · deduplicated diverse `/wordlist` output · instant non-looping `/translate` · sessions system (`/session save/list/load/search/delete`) · `/convert` `/qr` `/speedtest` `/pwcheck` `/debug` `/review` `/template` `/gitlog` `/hash` `/headers` `/osint` `/wordlist` `/think` `/debate` `/improve` `/eli5` `/ipinfo` `/base` `/clock` `/lorem` `/gist` · every mode now balances beginner-friendly and professional-level detail |
-| **v1.2** | Full GPU auto-detection (NVIDIA/AMD/Intel) · auto-updater with OS detection · memory system · 9 AI personas · daily goals · `/calc` `/summarize` `/timer` `/weather` `/passgen` `/encode` `/benchmark` `/syswatch` `/explaincode` `/roast` `/regex` `/git` `/diff` `/ctf` `/rename` `/challenge` `/translate` `/recap` · tab autocomplete · arrow key history |
+| **v1.4** | **Security release** — TLS certificate verification restored · auto-updater SHA-256 checksum verification against published manifest · atomic update writes (crash-safe) · memory plain-text storage warning · obfuscated `chr()` code removed · downloaded model SHA-256 verification |
+| **v1.3** | OS-aware AI responses · loop/repetition auto-detection · entropy-based password checks · clipboard auto-detection (Wayland/X11/macOS/WSL) · rewritten `/headers` with severity tags · sessions system · `/convert` `/qr` `/speedtest` `/pwcheck` `/debug` `/review` `/template` `/gitlog` `/hash` `/osint` `/wordlist` `/think` `/debate` `/improve` `/eli5` `/ipinfo` `/base` `/clock` `/lorem` `/gist` |
+| **v1.2** | Full GPU auto-detection · auto-updater · memory system · 9 AI personas · daily goals · `/calc` `/summarize` `/timer` `/weather` `/passgen` `/encode` `/benchmark` `/syswatch` · tab autocomplete · arrow key history |
 | **v1.1** | Web search (`/web`, `/cvesearch`) · 7 downloadable models · in-app model downloader |
 | **v1.0** | Initial release — 5 modes · agent engine · file loading · chat history |
 
@@ -478,7 +387,6 @@ sudo pacman -S python base-devel --noconfirm
 ```bash
 df -h /home
 mkdir -p ~/models
-# When setup asks where to save the model, type: ~/models
 ```
 
 **Model not found after setup:**
@@ -492,12 +400,11 @@ pip install ddgs --break-system-packages
 ```
 
 **`/copy` not working:**
-The tool now auto-detects your display server and suggests the exact install command for your distro — just follow what it prints.
+The tool auto-detects your display server and prints the exact install command for your distro.
 
 **NVIDIA GPU not accelerating:**
 ```bash
 CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --break-system-packages
-# GPU will be used automatically every run after this
 ```
 
 ---
@@ -506,7 +413,7 @@ CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --bre
 
 | File | Location | Safe from updates? |
 |------|----------|--------------------|
-| `cybersh_direct.py` | your cybersh folder | 🔄 Replaced with new version |
+| `cybersh_direct.py` | your cybersh folder | 🔄 Replaced (SHA-256 verified since v1.4) |
 | AI models | `~/ollama-models/` | ✅ Never touched |
 | Your memories | `~/.cybersh_memory.json` | ✅ Never touched |
 | Your config | `~/.cybersh_direct.json` | ✅ Never touched |
