@@ -229,6 +229,38 @@ def check_and_update(force: bool = False) -> None:
     except SyntaxError:
         print(f"\r\033[38;5;196m  ✗ Downloaded file invalid — aborting.{R2}\n"); return
 
+    # checksum verification against published manifest
+    import hashlib as _hashlib
+    new_code_hash = _hashlib.sha256(new_code.encode("utf-8")).hexdigest()
+    checksums_raw = _http_get(f"{REPO_RAW}/checksums.txt")
+    verified = False
+    if checksums_raw:
+        for line in checksums_raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].endswith("cybersh_direct.py"):
+                expected_hash = parts[0].lower()
+                if expected_hash == new_code_hash:
+                    verified = True
+                else:
+                    print(f"\r\033[38;5;196m  ✗ Checksum mismatch — aborting update for your safety.{R2}\n"
+                          f"  {D}This may indicate a corrupted download or a MITM attack.{R2}\n")
+                    return
+                break
+
+    if not verified:
+        print(f"\r\033[38;5;226m  ⚠ No checksum manifest found — cannot verify authenticity.{R2}")
+        print(f"  {D}SHA-256: {new_code_hash}{R2}")
+        try:
+            ans = input(f"  {Y}Install unverified update? [y/N]: {R2}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans != "y":
+            print(f"  {D}Update cancelled.{R2}\n")
+            return
+
     # backup
     backup = this_file + f".backup_v{local_ver}"
     try:
@@ -237,9 +269,14 @@ def check_and_update(force: bool = False) -> None:
     except Exception:
         pass
 
-    # write new file
+    # atomic write — temp file + os.replace() prevents corruption on crash/power loss
     try:
-        with open(this_file, "w", encoding="utf-8") as f: f.write(new_code)
+        tmp_path = this_file + ".tmp_update"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(new_code)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, this_file)
     except PermissionError:
         print(f"\r\033[38;5;196m  ✗ Permission denied. Try: chmod +w {this_file}{R2}\n"); return
     except Exception as e:
