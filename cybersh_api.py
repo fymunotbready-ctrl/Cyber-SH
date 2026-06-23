@@ -52,7 +52,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-setup_auth_routes(app)
+from auth import setup_auth_routes 
+setup_auth_routes(app)              
 # ─────────────────────────────────────────────
 #  CONFIG & PATHS
 # ─────────────────────────────────────────────
