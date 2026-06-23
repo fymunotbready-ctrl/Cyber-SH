@@ -1301,10 +1301,11 @@ def search_sessions(keyword: str):
 #  ROOT
 # ─────────────────────────────────────────────
 from fastapi.responses import FileResponse
-
 @app.get("/app")
 def serve_app():
-    return FileResponse("ind@app.get("/")
+    return FileResponse("index.html")
+
+@app.get("/")
 def root():
     return {
         "name": "Cyber-SH API",
