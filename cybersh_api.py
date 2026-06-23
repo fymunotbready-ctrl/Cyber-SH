@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from groq import Groq
-
+from auth import setup_auth_routes
 # ─────────────────────────────────────────────
 #  APP
 # ─────────────────────────────────────────────
@@ -52,7 +52,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+setup_auth_routes(app)
 # ─────────────────────────────────────────────
 #  CONFIG & PATHS
 # ─────────────────────────────────────────────
