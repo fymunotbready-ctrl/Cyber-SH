@@ -8,3 +8,5 @@ uvicorn
 
 # Web search — enables /web and /cvesearch commands (recommended)
 ddgs
+
+supabase==2.0.0
