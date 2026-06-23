@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cyber-SH</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #07070E;
+    --panel:    #0E0E1A;
+    --surface:  #141422;
+    --border:   #1E1E35;
+    --accent:   #00D4FF;
+    --accent2:  #7B5EFF;
+    --green:    #00FF94;
+    --text:     #DDE0EE;
+    --muted:    #5A5D7A;
+    --user-bg:  #151528;
+    --ai-bg:    #0E0E1A;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    overflow: hidden;
+  }
+
+  /* ── LAYOUT ── */
+  .app { display: flex; height: 100vh; }
+
+  /* ── SIDEBAR ── */
+  .sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 12px;
+    gap: 6px;
+  }
+
+  .logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    padding: 8px 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .sidebar-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 8px 12px 4px;
+  }
+
+  .mode-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--muted);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+    width: 100%;
+  }
+  .mode-btn:hover { background: var(--surface); color: var(--text); border-color: var(--border); }
+  .mode-btn.active {
+    background: var(--surface);
+    color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 12px rgba(0,212,255,0.08);
+  }
+  .mode-icon { font-size: 16px; width: 20px; text-align: center; }
+
+  .sidebar-spacer { flex: 1; }
+
+  .new-chat-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--muted);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: 100%;
+  }
+  .new-chat-btn:hover { background: var(--surface); color: var(--text); border-color: var(--accent); }
+
+  /* ── MAIN ── */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    position: relative;
+  }
+
+  /* ── TOPBAR ── */
+  .topbar {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+  .topbar-mode {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--accent);
+    background: rgba(0,212,255,0.08);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 6px;
+    padding: 3px 10px;
+    letter-spacing: 0.08em;
+  }
+  .topbar-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+  }
+  .status-txt {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* ── MESSAGES ── */
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    scroll-behavior: smooth;
+  }
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-track { background: transparent; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .message-row {
+    padding: 16px 24px;
+    display: flex;
+    gap: 16px;
+    max-width: 900px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .avatar.user {
+    background: var(--accent2);
+    color: white;
+    font-size: 11px;
+  }
+  .avatar.ai {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: white;
+    font-size: 12px;
+  }
+
+  .msg-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .msg-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.05em;
+  }
+  .msg-text {
+    color: var(--text);
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg-text code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--accent);
+  }
+  .msg-text pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    margin: 12px 0;
+  }
+  .msg-text pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text);
+    font-size: 13px;
+  }
+
+  /* blinking cursor during stream */
+  .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    background: var(--accent);
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink 0.8s step-end infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* ── WELCOME ── */
+  .welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 16px;
+    padding: 40px;
+    text-align: center;
+  }
+  .welcome-logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 42px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    text-shadow: 0 0 40px rgba(0,212,255,0.3);
+  }
+  .welcome-sub {
+    font-size: 14px;
+    color: var(--muted);
+    max-width: 400px;
+    line-height: 1.7;
+  }
+  .welcome-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  .chip {
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── INPUT ── */
+  .input-area {
+    padding: 16px 24px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+  .input-wrap {
+    max-width: 900px;
+    margin: 0 auto;
+    position: relative;
+  }
+  .input-box {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 56px 14px 18px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    min-height: 52px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .input-box::placeholder { color: var(--muted); }
+  .input-box:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,212,255,0.08);
+  }
+  .send-btn {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: var(--bg);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .send-btn:hover { background: #00EEFF; transform: scale(1.05); }
+  .send-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; transform: none; }
+  .send-btn svg { width: 16px; height: 16px; }
+
+  .input-hint {
+    max-width: 900px;
+    margin: 8px auto 0;
+    font-size: 11px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.03em;
+  }
+
+  /* ── MOBILE ── */
+  @media (max-width: 640px) {
+    .sidebar { display: none; }
+    .message-row { padding: 12px 16px; }
+    .input-area { padding: 12px 16px 16px; }
+    .welcome-logo { font-size: 30px; }
+  }
+
+  /* scrollbar for textarea */
+  .input-box::-webkit-scrollbar { width: 3px; }
+  .input-box::-webkit-scrollbar-thumb { background: var(--border); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-dot"></div>
+      CYBER-SH
+    </div>
+
+    <div class="sidebar-label">Mode</div>
+    <button class="mode-btn active" data-mode="chat" onclick="setMode(this)">
+      <span class="mode-icon">💬</span> Chat
+    </button>
+    <button class="mode-btn" data-mode="sec" onclick="setMode(this)">
+      <span class="mode-icon">🔐</span> Security
+    </button>
+    <button class="mode-btn" data-mode="code" onclick="setMode(this)">
+      <span class="mode-icon">⚡</span> Code
+    </button>
+    <button class="mode-btn" data-mode="vibe" onclick="setMode(this)">
+      <span class="mode-icon">🎨</span> Vibe
+    </button>
+    <button class="mode-btn" data-mode="agent" onclick="setMode(this)">
+      <span class="mode-icon">🤖</span> Agent
+    </button>
+
+    <div class="sidebar-spacer"></div>
+
+    <button class="new-chat-btn" onclick="newChat()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New chat
+    </button>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <!-- TOPBAR -->
+    <div class="topbar">
+      <div class="topbar-mode" id="topbarMode">CHAT</div>
+      <div class="topbar-title">Cyber-SH AI</div>
+      <div class="topbar-right">
+        <div class="status-dot"></div>
+        <span class="status-txt" id="statusTxt">online</span>
+      </div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div class="welcome-logo">CYBER-SH</div>
+        <div class="welcome-sub">AI-powered security & dev toolkit. Ask me anything — code, hacking, analysis, or just chat.</div>
+        <div class="welcome-chips">
+          <div class="chip" onclick="sendChip(this)">🔐 Find XSS vulnerabilities in this code</div>
+          <div class="chip" onclick="sendChip(this)">⚡ Write a Python web scraper</div>
+          <div class="chip" onclick="sendChip(this)">🤖 Explain how SQL injection works</div>
+          <div class="chip" onclick="sendChip(this)">🎨 Build a beautiful landing page</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INPUT -->
+    <div class="input-area">
+      <div class="input-wrap">
+        <textarea
+          class="input-box"
+          id="inputBox"
+          placeholder="Message Cyber-SH..."
+          rows="1"
+          onkeydown="handleKey(event)"
+          oninput="autoResize(this)"
+        ></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter to send &nbsp;·&nbsp; Shift+Enter for new line</div>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = '';
+let history = [];
+let currentMode = 'chat';
+let isStreaming = false;
+
+const MODES = {
+  chat:  { label: 'CHAT',  icon: '💬' },
+  sec:   { label: 'SEC',   icon: '🔐' },
+  code:  { label: 'CODE',  icon: '⚡' },
+  vibe:  { label: 'VIBE',  icon: '🎨' },
+  agent: { label: 'AGENT', icon: '🤖' },
+};
+
+function setMode(btn) {
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentMode = btn.dataset.mode;
+  document.getElementById('topbarMode').textContent = MODES[currentMode].label;
+}
+
+function newChat() {
+  history = [];
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = `
+    <div class="welcome" id="welcome">
+      <div class="welcome-logo">CYBER-SH</div>
+      <div class="welcome-sub">AI-powered security & dev toolkit. Ask me anything — code, hacking, analysis, or just chat.</div>
+      <div class="welcome-chips">
+        <div class="chip" onclick="sendChip(this)">🔐 Find XSS vulnerabilities in this code</div>
+        <div class="chip" onclick="sendChip(this)">⚡ Write a Python web scraper</div>
+        <div class="chip" onclick="sendChip(this)">🤖 Explain how SQL injection works</div>
+        <div class="chip" onclick="sendChip(this)">🎨 Build a beautiful landing page</div>
+      </div>
+    </div>`;
+}
+
+function sendChip(el) {
+  const text = el.textContent.trim().replace(/^[^\s]+\s/, '');
+  document.getElementById('inputBox').value = text;
+  sendMessage();
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderMarkdown(text) {
+  // code blocks
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${escapeHtml(code.trim())}</code></pre>`
+  );
+  // inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  return text;
+}
+
+function appendMessage(role, text, streaming = false) {
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
+
+  const msgs = document.getElementById('messages');
+  const row = document.createElement('div');
+  row.className = 'message-row';
+  row.id = streaming ? 'streaming-msg' : '';
+
+  const isUser = role === 'user';
+  const avatarLabel = isUser ? 'YOU' : 'AI';
+  const nameLabel = isUser ? 'You' : `Cyber-SH · ${MODES[currentMode].label}`;
+
+  row.innerHTML = `
+    <div class="avatar ${isUser ? 'user' : 'ai'}">${avatarLabel}</div>
+    <div class="msg-content">
+      <div class="msg-name">${nameLabel}</div>
+      <div class="msg-text" id="${streaming ? 'stream-text' : ''}">${
+        isUser ? escapeHtml(text) : renderMarkdown(text)
+      }${streaming ? '<span class="cursor"></span>' : ''}</div>
+    </div>`;
+
+  msgs.appendChild(row);
+  msgs.scrollTop = msgs.scrollHeight;
+  return row;
+}
+
+async function sendMessage() {
+  if (isStreaming) return;
+
+  const input = document.getElementById('inputBox');
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+
+  appendMessage('user', text);
+  history.push({ role: 'user', content: text });
+
+  isStreaming = true;
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('statusTxt').textContent = 'generating…';
+
+  // create streaming message row
+  appendMessage('assistant', '', true);
+  const streamEl = document.getElementById('stream-text');
+  let fullText = '';
+
+  try {
+    const res = await fetch(`${API}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: history,
+        mode: currentMode,
+        persona: 'default',
+        temperature: 0.7,
+        stream: true,
+        use_memory: false,
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') break;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.token) {
+            fullText += parsed.token;
+            streamEl.innerHTML = renderMarkdown(fullText) + '<span class="cursor"></span>';
+            document.getElementById('messages').scrollTop = 9999;
+          }
+        } catch {}
+      }
+    }
+
+  } catch (err) {
+    fullText = `⚠️ Error: ${err.message}. Make sure the backend is running.`;
+  }
+
+  // finalize
+  if (streamEl) {
+    streamEl.innerHTML = renderMarkdown(fullText);
+    streamEl.id = '';
+  }
+  const streamRow = document.getElementById('streaming-msg');
+  if (streamRow) streamRow.id = '';
+
+  history.push({ role: 'assistant', content: fullText });
+  isStreaming = false;
+  document.getElementById('sendBtn').disabled = false;
+  document.getElementById('statusTxt').textContent = 'online';
+  document.getElementById('inputBox').focus();
+}
+</script>
+</body>
+</html>
