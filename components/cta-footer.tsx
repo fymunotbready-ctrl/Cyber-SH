@@ -1,7 +1,7 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { DownloadIcon, BoltIcon } from "./icons"
+import { ChatIcon, BoltIcon } from "./icons"
 
 export function CtaFooter() {
   return (
@@ -17,7 +17,7 @@ export function CtaFooter() {
           <div className="relative z-10">
             <span className="inline-flex items-center gap-2 rounded-full border border-white/[0.12] bg-white/[0.04] px-4 py-1.5 text-xs text-muted">
               <BoltIcon size={14} />
-              Free to download · Runs forever offline
+              Free to use · Runs forever offline
             </span>
             <h2 className="mt-6 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
               Take your AI off the grid.
@@ -30,8 +30,8 @@ export function CtaFooter() {
               href="#"
               className="lg-specular glass glass-tactile mt-9 inline-flex items-center gap-2 rounded-full px-8 py-4 text-sm font-medium text-foreground"
             >
-              <DownloadIcon size={18} />
-              <span>Download Cyber-SH</span>
+              <ChatIcon size={18} />
+              <span>Talk 2 Me</span>
             </a>
           </div>
         </motion.div>

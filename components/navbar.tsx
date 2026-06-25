@@ -7,7 +7,7 @@ const links = [
   { label: "Showcase", href: "#showcase" },
   { label: "Features", href: "#features" },
   { label: "Privacy", href: "#features" },
-  { label: "Download", href: "#cta" },
+  { label: "Talk 2 Me", href: "#cta" },
 ]
 
 export function Navbar() {
@@ -54,7 +54,7 @@ export function Navbar() {
             href="#cta"
             className="ml-2 rounded-full border border-white/15 bg-white/[0.06] px-4 py-2 text-sm font-medium text-foreground transition-all hover:bg-white/[0.12]"
           >
-            Get Cyber-SH
+            Talk 2 Me
           </a>
         </div>
 

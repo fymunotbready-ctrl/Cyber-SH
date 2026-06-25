@@ -1,7 +1,7 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { ArrowRightIcon, DownloadIcon, LockIcon } from "./icons"
+import { ArrowRightIcon, ChatIcon, LockIcon } from "./icons"
 
 export function Hero() {
   return (
@@ -48,8 +48,8 @@ export function Hero() {
           href="#cta"
           className="lg-shimmer lg-specular glass glass-tactile group flex items-center gap-2 rounded-full px-7 py-3.5 text-sm font-medium text-foreground"
         >
-          <DownloadIcon size={18} />
-          <span>Download for Desktop</span>
+          <ChatIcon size={18} />
+          <span>Talk 2 Me</span>
         </a>
         <a
           href="#showcase"
