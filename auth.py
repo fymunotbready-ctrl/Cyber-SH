@@ -51,6 +51,10 @@ def _get_supabase():
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         return _supabase_client
     except Exception as exc:
+        import traceback
+        print("=== SUPABASE INIT ERROR ===")
+        traceback.print_exc()
+        print("============================")
         raise HTTPException(status_code=503, detail="Authentication service unavailable.") from exc
 
 
