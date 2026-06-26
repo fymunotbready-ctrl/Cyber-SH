@@ -26,6 +26,37 @@ export default function Page() {
     }
   }, [])
 
+  // GitHub OAuth callback — Supabase redirects back here with ?code=...
+  // after the user approves on GitHub. Exchange it for a session.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get("code")
+    if (!code) return
+
+    const BASE_URL = process.env.NEXT_PUBLIC_CYBERSH_API || ""
+    if (!BASE_URL) return
+
+    ;(async () => {
+      try {
+        const res = await fetch(`${BASE_URL}/auth/github/callback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, redirect_to: window.location.origin }),
+        })
+        const data = await res.json()
+        if (data.access_token) {
+          localStorage.setItem("cybersh_access_token", data.access_token)
+          localStorage.setItem("cybersh_refresh_token", data.refresh_token || "")
+        }
+        // Clean the ?code=... out of the URL bar
+        window.history.replaceState({}, "", window.location.pathname)
+        handleAuthSuccess(data.user?.email?.split("@")[0] || data.user?.user_metadata?.user_name || "cybersh.ai")
+      } catch {
+        window.history.replaceState({}, "", window.location.pathname)
+      }
+    })()
+  }, [])
+
   const handleAuthSuccess = (name: string) => {
     setUser({ name: name || "cybersh.ai" })
     setShowAuth(false)
