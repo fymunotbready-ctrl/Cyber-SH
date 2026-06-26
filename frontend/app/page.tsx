@@ -16,8 +16,10 @@ export default function Page() {
   const [user, setUser] = useState<{ name: string } | null>(null)
   const [mode, setMode] = useState<Mode>("dark")
 
-  // Splash → Landing sequence
+  // Splash → Landing sequence (skip if we're handling an OAuth redirect —
+  // the github callback below will set the screen itself once it's done)
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("code")) return
     const t1 = setTimeout(() => setSplashFading(true), 2900)
     const t2 = setTimeout(() => setScreen("landing"), 3600)
     return () => {
