@@ -9,10 +9,10 @@ ARG NEXT_PUBLIC_CYBERSH_API
 ENV NEXT_PUBLIC_CYBERSH_API=$NEXT_PUBLIC_CYBERSH_API
 
 # Copy frontend source (lives in the "frontend/" folder of this repo)
-COPY frontend/package.json ./
+COPY frontend_updated/ai-app-builder-main/package.json ./
 RUN npm install -g pnpm && pnpm install
 
-COPY frontend/ ./
+COPY frontend_updated/ai-app-builder-main/ ./
 RUN pnpm build
 # Output lands in /frontend/out because next.config.mjs has output: 'export'
 
