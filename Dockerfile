@@ -24,7 +24,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Backend source (everything at repo root, excluding the frontend/ folder)
-COPY auth.py cybersh_api-py cybersh_direct.py ./
+COPY auth.py cybersh_api.py cybersh_direct.py ./
 
 # Built frontend static files, served by FastAPI's StaticFiles mount
 COPY --from=frontend-build /frontend/out ./out
